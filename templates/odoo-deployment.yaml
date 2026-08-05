@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: odoo
-  namespace: odoo
+  namespace: {{ .Values.namespace.name }}
   labels:
     app: odoo
     component: web
@@ -23,7 +23,7 @@ spec:
     spec:
       initContainers:
         - name: wait-for-db
-          image: busybox:1.36
+          image: {{ .Values.odoo.initContainer.image }}
           command:
             - sh
             - -c
@@ -36,7 +36,8 @@ spec:
               echo "PostgreSQL is ready!"
       containers:
         - name: odoo
-          image: odoo:18
+          image: "{{ .Values.odoo.image.repository }}:{{ .Values.odoo.image.tag }}"
+          imagePullPolicy: {{ .Values.odoo.image.pullPolicy }}
           ports:
             - containerPort: 8069
               name: http
@@ -72,12 +73,7 @@ spec:
               subPath: odoo.conf
               readOnly: true
           resources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              cpu: "2"
-              memory: 2Gi
+            {{- toYaml .Values.odoo.resources | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /web/login

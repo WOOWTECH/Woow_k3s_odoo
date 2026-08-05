@@ -3,15 +3,15 @@ apiVersion: v1
 kind: Service
 metadata:
   name: db
-  namespace: odoo
+  namespace: {{ .Values.namespace.name }}
   labels:
     app: odoo
     component: database
 spec:
-  type: ClusterIP
+  type: {{ .Values.postgres.service.type }}
   ports:
     - name: postgres
-      port: 5432
+      port: {{ .Values.postgres.service.port }}
       targetPort: 5432
       protocol: TCP
   selector:

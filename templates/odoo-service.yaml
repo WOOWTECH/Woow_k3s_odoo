@@ -1,0 +1,22 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: odoo
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: odoo
+    component: web
+spec:
+  type: {{ .Values.odoo.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.odoo.service.port }}
+      targetPort: 8069
+      {{- if eq .Values.odoo.service.type "NodePort" }}
+      nodePort: {{ .Values.odoo.service.nodePort }}
+      {{- end }}
+      protocol: TCP
+  selector:
+    app: odoo
+    component: web

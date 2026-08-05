@@ -1,0 +1,21 @@
+apiVersion: v2
+name: odoo
+description: >-
+  Odoo 18 Community Edition on K3s/Kubernetes with a PostgreSQL 16
+  (pgvector) backend.
+type: application
+version: 1.0.0
+appVersion: "18"
+kubeVersion: ">=1.24.0-0"
+keywords:
+  - odoo
+  - erp
+  - postgresql
+  - pgvector
+home: https://github.com/WOOWTECH/Woow_k3s_odoo
+sources:
+  - https://github.com/WOOWTECH/Woow_k3s_odoo
+  - https://github.com/odoo/odoo
+maintainers:
+  - name: WoowTech
+    url: https://github.com/WOOWTECH

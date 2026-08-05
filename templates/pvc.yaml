@@ -1,0 +1,68 @@
+---
+# PVC for PostgreSQL data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: odoo-db-data
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: odoo
+    component: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.postgres.persistence.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.postgres.persistence.size }}
+---
+# PVC for odoo filestore (/var/lib/odoo)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: odoo-web-data
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: odoo
+    component: web
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.odoo.persistence.data.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.odoo.persistence.data.size }}
+---
+# PVC for custom addons (/mnt/extra-addons)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: odoo-addons
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: odoo
+    component: web
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.odoo.persistence.addons.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.odoo.persistence.addons.size }}
+---
+# PVC for odoo configuration (kept for parity with the original manifests)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: odoo-config
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: odoo
+    component: web
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.odoo.persistence.config.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.odoo.persistence.config.size }}

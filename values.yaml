@@ -1,0 +1,119 @@
+# Default values for the odoo chart.
+# Defaults reproduce the original Kustomize deployment 1:1
+# (namespace odoo, NodePort 31806, local-path storage, StatefulSet postgres).
+
+namespace:
+  # Create the target namespace as part of the release.
+  # Set to false if the namespace is managed elsewhere.
+  create: true
+  name: odoo
+
+odoo:
+  image:
+    repository: odoo
+    tag: "18"
+    # Explicit; the original manifests did not set pullPolicy on the
+    # ":18" tag, so Kubernetes defaults to IfNotPresent. Change to
+    # "Always" if you switch tag to :latest.
+    pullPolicy: IfNotPresent
+
+  # Injected into the odoo container via a ConfigMap.
+  # HOST/PORT are exposed as env vars; odoo.conf is mounted into
+  # /etc/odoo/odoo.conf.
+  config:
+    HOST: db
+    PORT: "5432"
+    odoo.conf: |
+      [options]
+      ; Odoo 18 Configuration File
+
+      ; Addons path
+      addons_path = /mnt/extra-addons
+
+      ; Database settings (injected via environment variables)
+      ; db_host = db
+      ; db_port = 5432
+      ; db_user = odoo
+      ; db_password =
+
+      ; Admin password for database management
+      admin_passwd = admin
+
+      ; Logging
+      log_level = info
+
+      ; Performance tuning
+      workers = 0
+      max_cron_threads = 1
+      limit_memory_hard = 2684354560
+      limit_memory_soft = 2147483648
+      limit_time_cpu = 600
+      limit_time_real = 1200
+
+      ; Proxy mode (set to True if behind reverse proxy)
+      proxy_mode = False
+
+  service:
+    type: NodePort
+    port: 8069
+    # Only used when type is NodePort.
+    nodePort: 31806
+
+  persistence:
+    # PVC for odoo filestore (/var/lib/odoo).
+    data:
+      storageClassName: local-path
+      size: 10Gi
+    # PVC for custom addons (/mnt/extra-addons).
+    addons:
+      storageClassName: local-path
+      size: 5Gi
+    # PVC for odoo configuration (currently unused by the deployment;
+    # kept for parity with the original manifests).
+    config:
+      storageClassName: local-path
+      size: 100Mi
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  initContainer:
+    image: busybox:1.36
+
+postgres:
+  image:
+    repository: pgvector/pgvector
+    tag: pg16
+    # Explicit; the original manifests did not set pullPolicy on a
+    # non-":latest" tag, so Kubernetes defaults to IfNotPresent.
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 5432
+
+  persistence:
+    # PVC for postgres data (/var/lib/postgresql/data via subPath pgdata).
+    storageClassName: local-path
+    size: 10Gi
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+secrets:
+  # -- PostgreSQL role used by odoo (change before deploying)
+  postgresUser: "odoo"
+  # -- PostgreSQL password (change before any non-test deployment)
+  postgresPassword: "changeme-postgres-password"
+  # -- Default database name
+  postgresDb: "postgres"
