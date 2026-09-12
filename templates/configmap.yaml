@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: odoo-config
-  namespace: {{ .Values.namespace.name }}
+  namespace: {{ include "odoo.ns" . }}
   labels:
     app: odoo
     component: web

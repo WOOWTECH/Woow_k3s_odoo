@@ -1,0 +1,79 @@
+{{- /*
+`helm test` smoke pod, uses the Odoo image itself (it ships python3):
+  - GET /web/login -> 200
+  - POST /web/database/create (master_pwd = ADMIN_PASSWD from Secret
+    odoo-secrets, whichever way it got there) to create a disposable database
+  - GET /web/database/selector -> the new database is listed
+This proves the admin_passwd-from-Secret wiring works end to end and that
+Postgres is reachable and can actually initialise a database, not just that
+the process is up.
+*/ -}}
+{{- if .Values.tests.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-smoke
+  namespace: {{ include "odoo.ns" . }}
+  labels:
+    app: odoo
+    component: smoke-test
+  annotations:
+    helm.sh/hook: test
+    # Kept until the next `helm test` so `helm test --logs` can always read it.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: "{{ .Values.odoo.image.repository }}:{{ .Values.odoo.image.tag }}"
+      command: ["python3", "-c"]
+      args:
+        - |
+          import os, sys, time, urllib.parse, urllib.request, urllib.error
+
+          base = "http://odoo:{{ .Values.odoo.service.port }}"
+          db = "smoketest"
+
+          def get(path, timeout=30):
+              with urllib.request.urlopen(base + path, timeout=timeout) as r:
+                  return r.status, r.read().decode(errors="replace")
+
+          s, _ = get("/web/login")
+          assert s == 200, ("web/login", s)
+          print("web/login: 200 OK")
+
+          data = urllib.parse.urlencode({
+              "master_pwd": os.environ["ADMIN_PASSWD"],
+              "name": db,
+              "login": "admin",
+              "password": "SmokeTest123!",
+              "lang": "en_US",
+              "country_code": "",
+              "phone": "",
+          }).encode()
+          req = urllib.request.Request(base + "/web/database/create", data=data, method="POST")
+          try:
+              with urllib.request.urlopen(req, timeout=590) as r:
+                  s2, body2 = r.status, r.read().decode(errors="replace")
+          except urllib.error.HTTPError as e:
+              s2, body2 = e.code, e.read().decode(errors="replace")
+          assert s2 in (200, 303), ("db create", s2, body2[:500])
+          print("db create:", s2)
+
+          s3, body3 = get("/web/database/selector")
+          assert s3 == 200 and db in body3, ("selector", s3, db in body3)
+          print("SMOKE OK: database", db, "was created and is listed")
+      env:
+        - name: ADMIN_PASSWD
+          valueFrom:
+            secretKeyRef:
+              name: odoo-secrets
+              key: ADMIN_PASSWD
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+{{- end }}

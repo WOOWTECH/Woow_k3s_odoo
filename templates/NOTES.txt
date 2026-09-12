@@ -1,0 +1,23 @@
+Odoo {{ .Chart.AppVersion }} Community - release {{ .Release.Name }}
+
+Namespace: {{ include "odoo.ns" . }}
+{{- if not .Values.secrets.create }}
+
+Secrets are NOT managed by this release (secrets.create=false). They must
+already exist: see examples/secrets.example.yaml.
+{{- end }}
+
+Wait for readiness:
+  kubectl -n {{ include "odoo.ns" . }} rollout status deploy/odoo --timeout=10m
+
+Verify:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --logs
+{{- if eq .Values.odoo.service.type "NodePort" }}
+  curl -s -o /dev/null -w '%{http_code}\n' http://<node-ip>:{{ .Values.odoo.service.nodePort }}/web/login
+{{- else }}
+  kubectl -n {{ include "odoo.ns" . }} port-forward svc/odoo 8069:{{ .Values.odoo.service.port }}
+{{- end }}
+
+`helm uninstall` keeps the Namespace, every PVC and any chart-created Secret
+(keepOnUninstall=true). To really delete the data too:
+  kubectl delete namespace {{ include "odoo.ns" . }}

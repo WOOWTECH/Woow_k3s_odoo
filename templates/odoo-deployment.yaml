@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: odoo
-  namespace: {{ .Values.namespace.name }}
+  namespace: {{ include "odoo.ns" . }}
   labels:
     app: odoo
     component: web
@@ -21,6 +21,10 @@ spec:
         app: odoo
         component: web
     spec:
+      {{- if .Values.odoo.podSecurityContext }}
+      securityContext:
+        {{- toYaml .Values.odoo.podSecurityContext | nindent 8 }}
+      {{- end }}
       initContainers:
         - name: wait-for-db
           image: {{ .Values.odoo.initContainer.image }}
@@ -34,6 +38,32 @@ spec:
                 sleep 2
               done
               echo "PostgreSQL is ready!"
+        - name: render-odoo-conf
+          # Combines the non-secret odoo.conf (ConfigMap) with admin_passwd
+          # (Secret) into one file on an emptyDir, so admin_passwd never sits
+          # in a ConfigMap and never appears in `kubectl get configmap -o yaml`.
+          image: {{ .Values.odoo.initContainer.image }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cp /template/odoo.conf /rendered/odoo.conf
+              printf '\nadmin_passwd = %s\n' "$ADMIN_PASSWD" >> /rendered/odoo.conf
+              echo "Rendered /rendered/odoo.conf (admin_passwd from Secret odoo-secrets)"
+          env:
+            - name: ADMIN_PASSWD
+              valueFrom:
+                secretKeyRef:
+                  name: odoo-secrets
+                  key: ADMIN_PASSWD
+          volumeMounts:
+            - name: odoo-config-template
+              mountPath: /template/odoo.conf
+              subPath: odoo.conf
+              readOnly: true
+            - name: odoo-config-rendered
+              mountPath: /rendered
       containers:
         - name: odoo
           image: "{{ .Values.odoo.image.repository }}:{{ .Values.odoo.image.tag }}"
@@ -68,10 +98,8 @@ spec:
               mountPath: /var/lib/odoo
             - name: odoo-addons
               mountPath: /mnt/extra-addons
-            - name: odoo-config-volume
-              mountPath: /etc/odoo/odoo.conf
-              subPath: odoo.conf
-              readOnly: true
+            - name: odoo-config-rendered
+              mountPath: /etc/odoo
           resources:
             {{- toYaml .Values.odoo.resources | nindent 12 }}
           readinessProbe:
@@ -106,9 +134,11 @@ spec:
         - name: odoo-addons
           persistentVolumeClaim:
             claimName: odoo-addons
-        - name: odoo-config-volume
+        - name: odoo-config-template
           configMap:
             name: odoo-config
             items:
               - key: odoo.conf
                 path: odoo.conf
+        - name: odoo-config-rendered
+          emptyDir: {}
