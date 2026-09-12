@@ -1,12 +1,20 @@
 # Default values for the odoo chart.
 # Defaults reproduce the original Kustomize deployment 1:1
-# (namespace odoo, NodePort 31806, local-path storage, StatefulSet postgres).
+# (namespace odoo, NodePort 31806, local-path storage, StatefulSet postgres),
+# except that secrets no longer ship with real-looking placeholder values and
+# odoo.conf no longer carries admin_passwd (see `secrets` below).
 
 namespace:
-  # Create the target namespace as part of the release.
-  # Set to false if the namespace is managed elsewhere.
+  # Render the Namespace object. A namespace equal to the release namespace
+  # (`-n`) is never rendered - create it with --create-namespace instead - so
+  # `helm uninstall` can never delete the namespace the release lives in.
   create: true
   name: odoo
+
+# Add `helm.sh/resource-policy: keep` to the Namespace, every PVC and any
+# Secret this chart renders, so `helm uninstall` never deletes the database,
+# the filestore or the admin password.
+keepOnUninstall: true
 
 odoo:
   image:
@@ -18,8 +26,10 @@ odoo:
     pullPolicy: IfNotPresent
 
   # Injected into the odoo container via a ConfigMap.
-  # HOST/PORT are exposed as env vars; odoo.conf is mounted into
-  # /etc/odoo/odoo.conf.
+  # HOST/PORT are exposed as env vars; odoo.conf is combined with the
+  # ADMIN_PASSWD Secret key by an initContainer and mounted into
+  # /etc/odoo/odoo.conf (see templates/odoo-deployment.yaml). This ConfigMap
+  # therefore does NOT contain admin_passwd - it lives in a Secret only.
   config:
     HOST: db
     PORT: "5432"
@@ -36,8 +46,11 @@ odoo:
       ; db_user = odoo
       ; db_password =
 
-      ; Admin password for database management
-      admin_passwd = admin
+      ; admin_passwd is intentionally NOT set here. An initContainer appends
+      ; "admin_passwd = <value from Secret odoo-secrets key ADMIN_PASSWD>"
+      ; to this file before Odoo starts, so the password never sits in a
+      ; ConfigMap. Do not add an admin_passwd line here - it would be
+      ; overridden (the appended line wins with Odoo's config parser).
 
       ; Logging
       log_level = info
@@ -82,6 +95,17 @@ odoo:
       cpu: "2"
       memory: 2Gi
 
+  # The official odoo:18 image runs as a fixed non-root user (uid 100, gid
+  # 101) and does not chown its volumes on startup (unlike the postgres
+  # image, which does). local-path-provisioner happens to create volumes
+  # world-writable, which hid this; StorageClasses that create root-owned
+  # volumes (e.g. Longhorn) do not, and Odoo fails with "Permission denied"
+  # on /var/lib/odoo. fsGroup makes every mounted volume group-writable by
+  # gid 101 regardless of the StorageClass.
+  podSecurityContext:
+    fsGroup: 101
+
+  # Also used for the `helm test` smoke pod (it only needs sh/cat).
   initContainer:
     image: busybox:1.36
 
@@ -110,10 +134,32 @@ postgres:
       cpu: "1"
       memory: 1Gi
 
+# Two Secrets, referenced by name by the Deployment/StatefulSet:
+#   odoo-db-secret: POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+#   odoo-secrets:   ADMIN_PASSWD (Odoo's database-manager master password)
+#
+# create: false (default) - the Secrets already exist (created from
+#   examples/secrets.example.yaml) and the chart never renders them, so a
+#   `helm upgrade` can never overwrite a real password with an empty value.
+# create: true - render both Secrets from the values below. postgresPassword
+#   and adminPasswd are required() and MUST be set (no default, no
+#   placeholder) - fresh installs and tests only.
 secrets:
-  # -- PostgreSQL role used by odoo (change before deploying)
+  create: false
+  # -- PostgreSQL role used by odoo. Not a secret by itself, but it lives in
+  #    the Secret alongside the password for a single source of DB config.
   postgresUser: "odoo"
-  # -- PostgreSQL password (change before any non-test deployment)
-  postgresPassword: "changeme-postgres-password"
-  # -- Default database name
+  # -- PostgreSQL password. Required when secrets.create=true; no default.
+  postgresPassword: ""
+  # -- Default database name.
   postgresDb: "postgres"
+  # -- Odoo database-manager master password (odoo.conf's admin_passwd).
+  #    Required when secrets.create=true; no default.
+  adminPasswd: ""
+
+tests:
+  # `helm test` smoke pod: GET /web/login, then create a throwaway database
+  # through /web/database/create using ADMIN_PASSWD, and confirm it appears
+  # in /web/database/selector. Read-only towards everything except that one
+  # disposable database.
+  enabled: true

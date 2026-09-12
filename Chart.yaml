@@ -4,7 +4,7 @@ description: >-
   Odoo 18 Community Edition on K3s/Kubernetes with a PostgreSQL 16
   (pgvector) backend.
 type: application
-version: 1.0.0
+version: 1.1.0
 appVersion: "18"
 kubeVersion: ">=1.24.0-0"
 keywords:

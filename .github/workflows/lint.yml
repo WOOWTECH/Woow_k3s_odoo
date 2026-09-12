@@ -1,0 +1,160 @@
+name: chart
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+env:
+  # Dummy values only: exercises templates/secrets.yaml without any real password.
+  SECRETS: secrets.create=true,secrets.postgresPassword=x,secrets.adminPasswd=y
+  KUBECONFORM_VERSION: v0.6.7
+  KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.5
+
+      - name: helm lint
+        run: |
+          helm lint .
+          helm lint . --set "$SECRETS"
+
+      - name: helm template (every values combination)
+        run: |
+          mkdir -p /tmp/r
+          helm template odoo . -n odoo                                       > /tmp/r/default.yaml
+          helm template odoo .                                               > /tmp/r/default-ns.yaml
+          helm template odoo . -n odoo --set "$SECRETS"                      > /tmp/r/secrets.yaml
+          helm template odoo . -n odoo --set "$SECRETS" --set keepOnUninstall=false > /tmp/r/no-keep.yaml
+          helm template odoo . -n odoo --set tests.enabled=false             > /tmp/r/no-tests.yaml
+          # The shape of a test install: own namespace, disposable storage, no NodePort.
+          helm template odoo . -n ht-odoo \
+            --set namespace.name=ht-odoo,namespace.create=false \
+            --set odoo.persistence.data.storageClassName=longhorn-delete \
+            --set odoo.persistence.addons.storageClassName=longhorn-delete \
+            --set odoo.persistence.config.storageClassName=longhorn-delete \
+            --set postgres.persistence.storageClassName=longhorn-delete \
+            --set odoo.service.type=ClusterIP \
+            --set "$SECRETS"                                                 > /tmp/r/test-install.yaml
+          wc -l /tmp/r/*.yaml
+
+      - name: Every template is tracked and renders
+        run: |
+          # An unanchored .gitignore pattern once kept templates/secrets.yaml out of git.
+          for f in $(find templates -type f); do
+            if git check-ignore --no-index -q "$f"; then echo "::error::$f is matched by .gitignore"; exit 1; fi
+          done
+          for f in $(find templates -type f -name '*.yaml'); do
+            grep -q "^# Source: odoo/$f\$" /tmp/r/*.yaml || { echo "::error::$f never renders"; exit 1; }
+          done
+          echo "every template is tracked and renders"
+
+      - name: kubeconform (schema validation)
+        run: |
+          curl -sSLo /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz
+          echo "${KUBECONFORM_SHA256}  /tmp/kc.tgz" | sha256sum -c -
+          tar -xzf /tmp/kc.tgz -C /usr/local/bin kubeconform
+          kubeconform -strict -summary /tmp/r/*.yaml
+
+      - name: Required secrets are enforced
+        run: |
+          if helm template odoo . --set secrets.create=true > /dev/null 2>&1; then
+            echo "secrets.create=true rendered without any secret values"; exit 1
+          fi
+          # Each key on its own: drop it from the dummy set and expect its own required() message.
+          for k in postgresPassword adminPasswd; do
+            set_without=$(echo "$SECRETS" | tr ',' '\n' | grep -v "^secrets.$k=" | paste -sd, -)
+            if out=$(helm template odoo . -n odoo --set "$set_without" 2>&1); then
+              echo "::error::secrets.$k is not enforced"; exit 1
+            fi
+            echo "$out" | grep -q "secrets.$k is required" || { echo "::error::wrong error for $k: $out"; exit 1; }
+          done
+          echo "required() guards fire"
+          # Both Secrets must render; catches templates/secrets.yaml going missing from git.
+          n=$(grep -c '^kind: Secret$' /tmp/r/secrets.yaml || true)
+          [ "$n" -eq 2 ] || { echo "expected 2 Secrets with secrets.create=true, got $n"; exit 1; }
+          echo "secrets.create=true renders both Secrets"
+
+      - name: admin_passwd never lands in the ConfigMap
+        run: |
+          for f in /tmp/r/default.yaml /tmp/r/secrets.yaml /tmp/r/test-install.yaml; do
+            python3 - "$f" <<'EOF'
+          import re, sys, yaml
+          for d in yaml.safe_load_all(open(sys.argv[1])):
+              if d and d["kind"] == "ConfigMap" and d["metadata"]["name"] == "odoo-config":
+                  conf = d["data"].get("odoo.conf", "")
+                  # Only an actual "key = value" directive counts as a leak; the
+                  # ConfigMap is allowed to mention "admin_passwd" in comments
+                  # explaining that it lives in a Secret instead.
+                  for line in conf.splitlines():
+                      assert not re.match(r"^\s*admin_passwd\s*=", line), \
+                          f"{sys.argv[1]}: admin_passwd directive leaked into the ConfigMap: {line!r}"
+          EOF
+          done
+          echo "admin_passwd is never rendered into the ConfigMap"
+
+      - name: Keep policy on the Namespace, PVCs and Secrets
+        run: |
+          python3 - <<'EOF'
+          import sys, yaml
+          bad = []
+          def objs(f): return [d for d in yaml.safe_load_all(open(f)) if d]
+          for d in objs("/tmp/r/secrets.yaml") + objs("/tmp/r/default-ns.yaml"):
+              if d["kind"] in ("Namespace", "PersistentVolumeClaim", "Secret"):
+                  if (d["metadata"].get("annotations") or {}).get("helm.sh/resource-policy") != "keep":
+                      bad.append(f"{d['kind']}/{d['metadata']['name']} has no keep policy")
+          for d in objs("/tmp/r/no-keep.yaml"):
+              if d["kind"] in ("Namespace", "PersistentVolumeClaim", "Secret"):
+                  if "resource-policy" in str(d["metadata"].get("annotations") or {}):
+                      bad.append(f"{d['kind']}/{d['metadata']['name']} kept its policy with keepOnUninstall=false")
+          for d in objs("/tmp/r/default.yaml"):
+              if d["kind"] == "Namespace" and d["metadata"]["name"] == "odoo":
+                  bad.append("a Namespace equal to the release namespace (-n odoo) must never be rendered")
+          sys.exit("\n".join(bad)) if bad else print("keep policy present; release namespace not rendered")
+          EOF
+
+      - name: No real secrets committed
+        run: |
+          python3 - <<'EOF'
+          import glob, sys, yaml
+          bad = []
+          s = yaml.safe_load(open("values.yaml"))["secrets"]
+          for k, v in s.items():
+              if k not in ("create", "postgresUser", "postgresDb") and v:
+                  bad.append(f"values.yaml secrets.{k} must be empty")
+          for f in ("/tmp/r/default.yaml", "/tmp/r/default-ns.yaml", "/tmp/r/no-tests.yaml"):
+              for d in yaml.safe_load_all(open(f)):
+                  if d and d["kind"] == "Secret":
+                      bad.append(f"{f} must not contain Secrets (secrets.create=false)")
+          for d in yaml.safe_load_all(open("examples/secrets.example.yaml")):
+              for k, v in ((d or {}).get("stringData") or {}).items():
+                  if k not in ("POSTGRES_USER", "POSTGRES_DB") and "REPLACE_ME" not in str(v):
+                      bad.append(f"examples: {d['metadata']['name']}.{k} is not a placeholder")
+          sys.exit("\n".join(bad)) if bad else print("no secrets committed")
+          EOF
+
+      - name: helm test smoke pod is a read-only hook
+        run: |
+          python3 - <<'EOF'
+          import sys, yaml
+          for d in yaml.safe_load_all(open("/tmp/r/default.yaml")):
+              if d and d["kind"] == "Pod" and d["metadata"]["name"].endswith("-smoke"):
+                  ann = d["metadata"].get("annotations") or {}
+                  assert ann.get("helm.sh/hook") == "test", ann
+                  assert ann.get("helm.sh/hook-delete-policy") == "before-hook-creation", ann
+                  print("helm test hook annotations present")
+                  break
+          else:
+              sys.exit("no *-smoke test Pod rendered with tests.enabled=true (default)")
+          EOF
+
+      - name: helm package
+        run: helm package . -d /tmp/pkg
