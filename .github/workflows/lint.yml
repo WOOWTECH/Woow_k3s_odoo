@@ -44,6 +44,11 @@ jobs:
             --set postgres.persistence.storageClassName=longhorn-delete \
             --set odoo.service.type=ClusterIP \
             --set "$SECRETS"                                                 > /tmp/r/test-install.yaml
+            # namespace.name defaults to "" so `-n` wins, which means the Namespace
+            # object is never rendered by the combinations above (a release cannot own
+            # the namespace it lives in). Render it explicitly, or the "every template
+            # renders" guard below fails on templates/namespace.yaml.
+            helm template odoo . -n release-ns --set namespace.create=true --set namespace.name=odoo-elsewhere  > /tmp/r/other-ns.yaml
           wc -l /tmp/r/*.yaml
 
       - name: Every template is tracked and renders
