@@ -1,0 +1,6 @@
+apiVersion: v2
+name: odoo-tenant
+description: One live Odoo tenant on woow-k3s - Odoo with its nginx sidecar, PostgreSQL, the Cloudflare tunnel and the nightly database backup
+type: application
+version: 1.0.0
+appVersion: "18"

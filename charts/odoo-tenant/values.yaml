@@ -1,0 +1,147 @@
+# Defaults for the odoo-tenant chart.
+#
+# This chart reproduces Odoo tenants that were applied by hand with kubectl.
+# They are NOT one shape - see the comment in templates/odoo-deployment.yaml -
+# so most of a tenant's pod spec arrives here as data rather than being derived.
+# An instance values file is therefore long. That is honest: the length is the
+# tenant's own provisioning logic, not chart boilerplate.
+#
+# For a FRESH Odoo install use ../odoo instead. This chart exists to adopt what
+# is already running.
+
+namespace:
+  create: false
+  # EMPTY so `-n` alone controls placement. A non-empty value here silently
+  # overrides `-n`, which is how a rehearsal once wrote Helm ownership
+  # annotations onto a live production Deployment.
+  name: ""
+
+# Prefix every derived name comes from: <tenant>-odoo, <tenant>-postgres,
+# <tenant>-cloudflared, <tenant>-odoo-svc, <tenant>-postgres-svc.
+# Every one of those can still be overridden below, because the live names do
+# not all follow the rule.
+tenant: ""
+
+odoo:
+  # Overrides the derived `<tenant>-odoo`. One tenant's Deployment is just
+  # `odoo`, with no prefix at all.
+  name: ""
+  containerName: odoo
+  replicas: 1
+  # Recreate everywhere live: the data volume is ReadWriteOnce, and a rolling
+  # update would surge a pod that waits forever for a volume the old one holds.
+  strategy: Recreate
+  image: odoo:18.0
+  imagePullPolicy: IfNotPresent
+  # Selector labels. IMMUTABLE on a live Deployment - must match what runs.
+  selectorLabels: {}
+  labels: {}
+  podExtraLabels: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  podSecurityContext: {}
+  automountServiceAccountToken: null
+  # One tenant pins a hostname and a DNS search path on the pod.
+  hostAliases: []
+  dnsConfig: {}
+  # Carried VERBATIM from the live pod - this is the tenant's own provisioning
+  # script, not something to regenerate. See templates/odoo-deployment.yaml.
+  initContainers: []
+  command: []
+  env: []
+  ports: []
+  livenessProbe: {}
+  readinessProbe: {}
+  startupProbe: {}
+  resources: {}
+  volumeMounts: []
+  # Verbatim: which volumes exist, what backs them and their ORDER are all part
+  # of the pod template.
+  volumes: []
+  service:
+    name: ""
+    type: ClusterIP
+    labels: {}
+    ports: []
+
+# The nginx sidecar that fronts Odoo in the same pod. Every live tenant has one.
+nginx:
+  enabled: true
+  containerName: nginx
+  image: nginx:1.27-alpine
+  imagePullPolicy: IfNotPresent
+  env: []
+  ports: []
+  livenessProbe: {}
+  readinessProbe: {}
+  resources: {}
+  volumeMounts: []
+
+postgres:
+  enabled: true
+  # Overrides the derived `<tenant>-postgres`.
+  name: ""
+  containerName: postgres
+  replicas: 1
+  strategy: Recreate
+  image: postgres:16-alpine
+  imagePullPolicy: IfNotPresent
+  selectorLabels: {}
+  labels: {}
+  podExtraLabels: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  podSecurityContext: {}
+  automountServiceAccountToken: null
+  env: []
+  ports: []
+  livenessProbe: {}
+  readinessProbe: {}
+  resources: {}
+  volumeMounts: []
+  volumes: []
+  service:
+    name: ""
+    type: ClusterIP
+    labels: {}
+    ports: []
+
+tunnel:
+  enabled: true
+  # Overrides the derived `<tenant>-cloudflared`. One tenant's tunnel is named
+  # after a different project entirely.
+  name: ""
+  containerName: cloudflared
+  replicas: 1
+  image: cloudflare/cloudflared:latest
+  imagePullPolicy: Always
+  selectorLabels: {}
+  labels: {}
+  podExtraLabels: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  strategy: {}
+  # The token lives in here, either as a secretKeyRef in `env` or as the last
+  # `--token` argument. NEVER commit a plain one - pass it with --set-string.
+  args: []
+  env: []
+  lifecycle: {}
+  livenessProbe: {}
+  readinessProbe: {}
+  resources: {}
+
+backup:
+  # Three of the seventeen tenants have no backup CronJob at all.
+  enabled: true
+  name: pg-backup
+  schedule: "0 2 * * *"
+  concurrencyPolicy: ""
+  successfulJobsHistoryLimit: null
+  failedJobsHistoryLimit: null
+  backoffLimit: null
+  restartPolicy: OnFailure
+  labels: {}
+  nodeSelector: {}
+  # Verbatim, like the init containers: the backup command is per-tenant.
+  containers: []
+  volumes: []

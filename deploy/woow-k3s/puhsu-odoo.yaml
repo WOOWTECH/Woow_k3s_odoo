@@ -1,0 +1,320 @@
+# Instance values for the puhsu-odoo Odoo tenant on woow-k3s.
+# Generated from the live objects: the render reproduces the running pod
+# templates exactly, so adopting them restarts nothing.
+#
+# The init containers below are this tenant's own provisioning script,
+# carried verbatim. Do not regenerate or 'tidy' them.
+#
+# SAFETY: never set `namespace:` here - placement is `-n` only.
+
+tenant: puhsu
+
+odoo:
+  containerName: odoo
+  replicas: 1
+  strategy: Recreate
+  image: odoo:18.0
+  imagePullPolicy: IfNotPresent
+  # IMMUTABLE on the live Deployment.
+  selectorLabels:
+    app.kubernetes.io/name: odoo
+    app.kubernetes.io/part-of: puhsu
+  labels:
+    app.kubernetes.io/name: odoo
+    app.kubernetes.io/part-of: puhsu
+    app.kubernetes.io/version: '18.0'
+  podExtraLabels:
+    app.kubernetes.io/version: '18.0'
+  podAnnotations:
+    kubectl.kubernetes.io/restartedAt: '2026-09-12T04:02:47+08:00'
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  podSecurityContext:
+    fsGroup: 101
+  # Verbatim - this tenant's provisioning script.
+  initContainers:
+    - command:
+      - sh
+      - -c
+      - chown -R 100:101 /var/lib/odoo && chmod -R 770 /var/lib/odoo
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      name: fix-permissions
+      resources:
+        limits:
+          cpu: 50m
+          memory: 32Mi
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+      - mountPath: /var/lib/odoo
+        name: odoo-data
+    - command:
+      - sh
+      - -c
+      - "echo \"Waiting for PostgreSQL...\"\nuntil nc -z puhsu-postgres-svc 5432; do\n  echo \"  not ready - sleeping\"\n  sleep 2\ndone\necho \"PostgreSQL ready!\"\n"
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      name: wait-for-postgres
+      resources:
+        limits:
+          cpu: 50m
+          memory: 32Mi
+        requests:
+          cpu: 10m
+          memory: 16Mi
+    - command:
+      - sh
+      - -c
+      - "set -e\necho \"=== Checking database status ===\"\nDB_READY=$(python3 -c \"\nimport psycopg2\ntry:\n    conn = psycopg2.connect(host='puhsu-postgres-svc', dbname='puhsu', user='puhsu', password='__PGPASSWORD__')\n    cur = conn.cursor()\n    cur.execute(\\\"SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='ir_module_module'\\\")\n    count = cur.fetchone()[0]\n    conn.close()\n    print('yes' if count > 0 else 'no')\nexcept:\n    print('no')\n\" 2>/dev/null || echo \"no\")\n\nif [ \"$DB_READY\" = \"yes\" ]; then\n  echo \"Database already initialized. Skipping.\"\n  exit 0\nfi\n\necho \"=== Initializing empty Odoo database 'puhsu' with base module ===\"\necho \"This may take several minutes...\"\n\nodoo -d puhsu \\\n  -i base \\\n  --load-language=zh_TW \\\n  --stop-after-init \\\n  -c /etc/odoo/odoo.conf\n\necho \"=== Configuring Taiwan locale settings ===\"\npython3 << 'PYEOF'\nimport psycopg2\nconn = psycopg2.connect(host='puhsu-postgres-svc', dbname='puhsu', user='puhsu', password='__PGPASSWORD__')\ncur = conn.cursor()\ncur.execute(\"UPDATE res_partner SET lang='zh_TW', tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users WHERE login='admin')\")\ncur.execute(\"UPDATE res_partner SET tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users) AND (tz IS NULL OR tz='' OR tz='Europe/Brussels')\")\ncur.execute(\"SELECT id FROM res_country WHERE code='TW'\")\ntw = cur.fetchone()\nif tw:\n    cur.execute(\"UPDATE res_partner SET country_id=%s WHERE id IN (SELECT partner_id FROM res_company WHERE id=1)\", (tw[0],))\ncur.execute(\"SELECT id FROM res_currency WHERE name='TWD'\")\ntwd = cur.fetchone()\nif twd:\n    cur.execute(\"UPDATE res_company SET currency_id=%s WHERE id=1\", (twd[0],))\n    cur.execute(\"UPDATE res_currency SET active=true WHERE name='TWD'\")\ncur.execute(\"UPDATE res_company SET name='Puhsu' WHERE id=1\")\ncur.execute(\"UPDATE res_partner SET name='Puhsu' WHERE id IN (SELECT partner_id FROM res_company WHERE id=1)\")\nconn.commit()\ncur.close()\nconn.close()\nprint(\"Taiwan locale configured!\")\nPYEOF\n\necho \"=== Database initialization complete ===\"\necho \"  Login: admin / admin\"\necho \"  Database: puhsu\"\n"
+      image: odoo:18.0
+      imagePullPolicy: IfNotPresent
+      name: init-db
+      resources: {}
+      volumeMounts:
+      - mountPath: /etc/odoo/odoo.conf
+        name: odoo-config
+        readOnly: true
+        subPath: odoo.conf
+      - mountPath: /var/lib/odoo
+        name: odoo-data
+      - mountPath: /mnt/extra-addons
+        name: odoo-addons
+  env:
+    - name: HOST
+      value: puhsu-postgres-svc
+    - name: PORT
+      value: '5432'
+    - name: USER
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_USER
+          name: puhsu-postgres-secret
+    - name: PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_PASSWORD
+          name: puhsu-postgres-secret
+  ports:
+    - containerPort: 8069
+      name: odoo-http
+      protocol: TCP
+    - containerPort: 8072
+      name: odoo-lp
+      protocol: TCP
+  livenessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    initialDelaySeconds: 120
+    periodSeconds: 30
+    successThreshold: 1
+    timeoutSeconds: 10
+  readinessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  startupProbe:
+    failureThreshold: 30
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  resources:
+    limits:
+      cpu: '2'
+      memory: 3Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  volumeMounts:
+    - mountPath: /var/lib/odoo
+      name: odoo-data
+    - mountPath: /mnt/extra-addons
+      name: odoo-addons
+    - mountPath: /etc/odoo/odoo.conf
+      name: odoo-config
+      readOnly: true
+      subPath: odoo.conf
+  # Verbatim: order is part of the pod template.
+  volumes:
+    - name: odoo-data
+      persistentVolumeClaim:
+        claimName: puhsu-odoo-data
+    - name: odoo-addons
+      persistentVolumeClaim:
+        claimName: puhsu-odoo-addons
+    - configMap:
+        defaultMode: 420
+        name: puhsu-odoo-config
+      name: odoo-config
+    - configMap:
+        defaultMode: 420
+        name: puhsu-nginx-config
+      name: nginx-config
+    - name: nginx-cache
+      persistentVolumeClaim:
+        claimName: puhsu-nginx-cache-pvc
+  service:
+    type: ClusterIP
+    ports:
+      - name: odoo
+        port: 8069
+        protocol: TCP
+        targetPort: 8069
+      - name: longpolling
+        port: 8072
+        protocol: TCP
+        targetPort: 8072
+      - name: nginx
+        port: 8080
+        protocol: TCP
+        targetPort: 8080
+
+nginx:
+  enabled: true
+  containerName: nginx
+  image: nginx:1.27-alpine
+  imagePullPolicy: IfNotPresent
+  ports:
+    - containerPort: 8080
+      name: nginx-http
+      protocol: TCP
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  volumeMounts:
+    - mountPath: /etc/nginx/nginx.conf
+      name: nginx-config
+      readOnly: true
+      subPath: nginx.conf
+    - mountPath: /var/cache/nginx
+      name: nginx-cache
+
+postgres:
+  enabled: true
+  containerName: postgres
+  replicas: 1
+  strategy: Recreate
+  image: postgres:16-alpine
+  imagePullPolicy: IfNotPresent
+  selectorLabels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: puhsu
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: puhsu
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  env:
+    - name: POSTGRES_USER
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_USER
+          name: puhsu-postgres-secret
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_PASSWORD
+          name: puhsu-postgres-secret
+    - name: POSTGRES_DB
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_DB
+          name: puhsu-postgres-secret
+    - name: PGDATA
+      value: /var/lib/postgresql/data/pgdata
+  ports:
+    - containerPort: 5432
+      name: postgres
+      protocol: TCP
+  resources:
+    limits:
+      cpu: '1'
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  volumeMounts:
+    - mountPath: /var/lib/postgresql/data
+      name: postgres-data
+  volumes:
+    - name: postgres-data
+      persistentVolumeClaim:
+        claimName: puhsu-db-pvc
+  service:
+    type: ClusterIP
+    ports:
+      - port: 5432
+        protocol: TCP
+        targetPort: 5432
+
+tunnel:
+  enabled: true
+  containerName: cloudflared
+  replicas: 1
+  image: cloudflare/cloudflared:latest
+  imagePullPolicy: IfNotPresent
+  selectorLabels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/part-of: puhsu
+  labels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/part-of: puhsu
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  args:
+    - tunnel
+    - --no-autoupdate
+    - --metrics
+    - 0.0.0.0:2000
+    - run
+    - --token
+    - $(TUNNEL_TOKEN)
+  env:
+    - name: TUNNEL_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: CF_TUNNEL_TOKEN
+          name: puhsu-cf-secrets
+  livenessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /ready
+      port: 2000
+      scheme: HTTP
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    successThreshold: 1
+    timeoutSeconds: 1
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+backup:
+  # This tenant has no backup CronJob.
+  enabled: false

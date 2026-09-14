@@ -1,0 +1,44 @@
+{{- if .Values.backup.enabled }}
+{{- /* Nightly pg_dump. Three of the seventeen tenants have none. */ -}}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Values.backup.name }}
+  namespace: {{ include "odoo-tenant.ns" . }}
+  {{- with .Values.backup.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  {{- with .Values.backup.concurrencyPolicy }}
+  concurrencyPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.backup.successfulJobsHistoryLimit }}
+  successfulJobsHistoryLimit: {{ . }}
+  {{- end }}
+  {{- with .Values.backup.failedJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ . }}
+  {{- end }}
+  jobTemplate:
+    spec:
+      {{- with .Values.backup.backoffLimit }}
+      backoffLimit: {{ . }}
+      {{- end }}
+      template:
+        spec:
+          restartPolicy: {{ .Values.backup.restartPolicy }}
+          {{- with .Values.backup.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.backup.containers }}
+          containers:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.backup.volumes }}
+          volumes:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

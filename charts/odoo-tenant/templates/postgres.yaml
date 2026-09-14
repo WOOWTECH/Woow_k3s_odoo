@@ -1,0 +1,97 @@
+{{- if .Values.postgres.enabled }}
+{{- /*
+PostgreSQL as a Deployment, not a StatefulSet. That is what every live tenant
+runs, and the distinction is not cosmetic: a StatefulSet's volumeClaimTemplates
+are immutable, so a takeover cannot convert one into the other. Recreate rather
+than RollingUpdate, because the data volume is ReadWriteOnce and a surge pod
+would wait forever for a volume the old pod still holds.
+*/ -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "odoo-tenant.pgName" . }}
+  namespace: {{ include "odoo-tenant.ns" . }}
+  {{- with .Values.postgres.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.postgres.replicas }}
+  strategy:
+    type: {{ .Values.postgres.strategy }}
+  selector:
+    matchLabels:
+      {{- include "odoo-tenant.pgSelector" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.postgres.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "odoo-tenant.pgSelector" . | nindent 8 }}
+        {{- with .Values.postgres.podExtraLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.postgres.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.postgres.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not (kindIs "invalid" .Values.postgres.automountServiceAccountToken) }}
+      automountServiceAccountToken: {{ .Values.postgres.automountServiceAccountToken }}
+      {{- end }}
+      containers:
+      - name: {{ .Values.postgres.containerName }}
+        image: {{ .Values.postgres.image }}
+        imagePullPolicy: {{ .Values.postgres.imagePullPolicy }}
+        {{- with .Values.postgres.env }}
+        env:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.postgres.ports }}
+        ports:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.postgres.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.postgres.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.postgres.resources | nindent 10 }}
+        {{- with .Values.postgres.volumeMounts }}
+        volumeMounts:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.postgres.volumes }}
+      volumes:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "odoo-tenant.pgService" . }}
+  namespace: {{ include "odoo-tenant.ns" . }}
+  {{- with .Values.postgres.service.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.postgres.service.type }}
+  selector:
+    {{- include "odoo-tenant.pgSelector" . | nindent 4 }}
+  {{- with .Values.postgres.service.ports }}
+  ports:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

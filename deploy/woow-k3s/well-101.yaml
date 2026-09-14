@@ -1,0 +1,381 @@
+# Instance values for the well-101 Odoo tenant on woow-k3s.
+# Generated from the live objects: the render reproduces the running pod
+# templates exactly, so adopting them restarts nothing.
+#
+# The init containers below are this tenant's own provisioning script,
+# carried verbatim. Do not regenerate or 'tidy' them.
+#
+# SAFETY: never set `namespace:` here - placement is `-n` only.
+
+tenant: well-101
+
+odoo:
+  name: odoo
+  containerName: odoo
+  replicas: 1
+  strategy: Recreate
+  image: odoo:18.0
+  imagePullPolicy: IfNotPresent
+  # IMMUTABLE on the live Deployment.
+  selectorLabels:
+    app.kubernetes.io/name: odoo
+  labels:
+    app.kubernetes.io/name: odoo
+    app.kubernetes.io/part-of: well-101
+    app.kubernetes.io/version: '18.0'
+  podExtraLabels:
+    app.kubernetes.io/part-of: well-101
+    app.kubernetes.io/version: '18.0'
+  podAnnotations:
+    kubectl.kubernetes.io/restartedAt: '2026-06-17T21:26:13+08:00'
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  hostAliases:
+    - hostnames:
+      - postgres
+      ip: 10.43.196.136
+  dnsConfig:
+    nameservers:
+    - 8.8.8.8
+    - 1.1.1.1
+    searches:
+    - well-101.svc.cluster.local
+    - svc.cluster.local
+    - cluster.local
+  # Verbatim - this tenant's provisioning script.
+  initContainers:
+    - command:
+      - sh
+      - -c
+      - "echo \"Waiting for PostgreSQL...\"\nuntil nc -z postgres 5432; do\n  echo \"PostgreSQL not ready, retrying in 2s...\"\n  sleep 2\ndone\necho \"PostgreSQL is ready!\"\n"
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      name: wait-for-postgres
+      resources: {}
+    - command:
+      - sh
+      - -c
+      - "set -e\ncd /mnt/extra-addons\n\n# Build auth URL prefix\nif [ -n \"$GITHUB_TOKEN\" ]; then\n  GH_URL=\"https://${GITHUB_TOKEN}@github.com/WOOWTECH\"\n  echo \"Using authenticated GitHub access\"\nelse\n  GH_URL=\"https://github.com/WOOWTECH\"\n  echo \"WARNING: No GITHUB_TOKEN - private repos will fail\"\nfi\n\nclone_repo() {\n  REPO_NAME=\"$1\"\n  TARGET=\"${2:-$REPO_NAME}\"\n  BRANCH=\"${3:-18.0}\"\n  if [ -d \"$TARGET\" ] || [ -d \"_repo_${TARGET}\" ]; then\n    echo \"Module $REPO_NAME already exists, skipping.\"\n    return 0\n  fi\n  echo \"Cloning $REPO_NAME (branch: $BRANCH)...\"\n  git clone --depth 1 -b \"$BRANCH\" \"${GH_URL}/$REPO_NAME.git\" \"$TARGET\" 2>/dev/null || \\\n  git clone --depth 1 -b main \"${GH_URL}/$REPO_NAME.git\" \"$TARGET\" 2>/dev/null || \\\n  git clone --depth 1 \"${GH_URL}/$REPO_NAME.git\" \"$TARGET\" || \\\n  echo \"WARNING: Failed to clone $REPO_NAME\"\n}\n\necho \"=== Cloning custom modules from WOOWTECH GitHub ===\"\n\n# --- Existing repos ---\nclone_repo \"cloud_link\" \"_repo_cloud_link\"\nclone_repo \"sh_document_management\" \"_repo_sh_document_management\"\nclone_repo \"Odoo_tool-device_borrow\" \"Odoo_tool-device_borrow\"\nclone_repo \"odoo_color_customizer\" \"_repo_odoo_color_customizer\"\n\n# --- WELL/LEED modules: subdirectory repos (symlink loop handles them) ---\nclone_repo \"Woow_odoo_ai_livechat\" \"_repo_ai_livechat\"\nclone_repo \"Woow_odoo_website_auth\" \"_repo_woow_website_auth\"\nclone_repo \"Woow_odoo_website_snippet\" \"_repo_woow_snippet_builder\"\nclone_repo \"Woow_odoo_saas_management\" \"_repo_woow_service_hub\"\nclone_repo \"Odoo_maintanence_enhance\" \"_repo_maintenance_enhance\"\n\n# --- WELL/LEED modules: root-level repos (clone with correct technical name) ---\nclone_repo \"odoo-addon-odoo-ha-addon\" \"odoo_ha_addon\"\nclone_repo \"Woow_odoo_internal_booking\" \"odoo_booking_reservation\"\nclone_repo \"Woow_dev_website_survey_portal\" \"woow_dev_website_survey_portal\"\n\n# Create symlinks for modules inside subdirectories\nfor dir in _repo_* Odoo_*; do\n  [ -d \"$dir\" ] || continue\n  for subdir in \"${dir}\"/*/; do\n    if [ -f \"${subdir}__manifest__.py\" ] || [ -f \"${subdir}__openerp__.py\" ]; then\n      module_name=$(basename \"$subdir\")\n      if [ ! -e \"$module_name\" ]; then\n        echo \"Linking module: $module_name -> $subdir\"\n        ln -sf \"$(pwd)/${subdir%/}\" \"$module_name\"\n      fi\n    fi\n  done\ndone\n\n# Root-level manifest: symlink maintenance_portal from _repo_maintenance_enhance\nif [ -d \"_repo_maintenance_enhance\" ] && [ ! -e \"maintenance_portal\" ]; then\n  echo \"Linking root module: maintenance_portal -> _repo_maintenance_enhance\"\n  ln -sf \"$(pwd)/_repo_maintenance_enhance\" maintenance_portal\nfi\n\n# Create cs_portal_discuss stub (dependency for odoo_booking_reservation)\nif [ ! -d \"cs_portal_discuss\" ]; then\n  echo \"Creating cs_portal_discuss stub module...\"\n  mkdir -p cs_portal_discuss\n  cat > cs_portal_discuss/__manifest__.py << 'STUBEOF'\n{\n    'name': 'Portal Discuss Bridge',\n    'version': '18.0.1.0.0',\n    'category': 'Hidden',\n    'summary': 'Stub: Portal user discussion channel integration',\n    'depends': ['portal', 'mail'],\n    'installable': True,\n    'auto_install': False,\n    'license': 'LGPL-3',\n}\nSTUBEOF\n  cat > cs_portal_discuss/__init__.py << 'STUBEOF'\n# Stub module for cs_portal_discuss dependency\nSTUBEOF\nfi\n\necho \"=== Custom modules ready ===\"\nls -la /mnt/extra-addons/\n"
+      env:
+      - name: GITHUB_TOKEN
+        valueFrom:
+          secretKeyRef:
+            key: token
+            name: github-token
+            optional: true
+      image: alpine/git:latest
+      imagePullPolicy: Always
+      name: clone-modules
+      resources: {}
+      volumeMounts:
+      - mountPath: /mnt/extra-addons
+        name: odoo-addons
+    - command:
+      - sh
+      - -c
+      - "set -e\necho \"=== Checking database status ===\"\n\n# Check if database is already initialized\nDB_READY=$(python3 -c \"\nimport psycopg2\ntry:\n    conn = psycopg2.connect(host='postgres', dbname='well101', user='well101', password='__PGPASSWORD__')\n    cur = conn.cursor()\n    cur.execute(\\\"SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='ir_module_module'\\\")\n    count = cur.fetchone()[0]\n    conn.close()\n    print('yes' if count > 0 else 'no')\nexcept:\n    print('no')\n\" 2>/dev/null || echo \"no\")\n\nif [ \"$DB_READY\" = \"yes\" ]; then\n  echo \"Database already initialized. Skipping.\"\n  exit 0\nfi\n\necho \"=== Initializing Odoo database 'well101' with base module only ===\"\necho \"This may take several minutes...\"\n\n# Initialize database with base module only (install other apps via Odoo UI)\nodoo -d well101 \\\n  -i base \\\n  --load-language=zh_TW \\\n  --stop-after-init \\\n  -c /etc/odoo/odoo.conf\n\necho \"=== Configuring Taiwan locale settings ===\"\npython3 << 'PYEOF'\nimport psycopg2\n\nconn = psycopg2.connect(host='postgres', dbname='well101', user='well101', password='__PGPASSWORD__')\ncur = conn.cursor()\n\n# In Odoo 18, lang/tz are on res_partner, not res_users\ncur.execute(\"UPDATE res_partner SET lang='zh_TW', tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users WHERE login='admin')\")\nprint(\"  - Admin: lang=zh_TW, tz=Asia/Taipei\")\n\n# Set all user partners timezone\ncur.execute(\"UPDATE res_partner SET tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users) AND (tz IS NULL OR tz='' OR tz='Europe/Brussels')\")\n\n# Set company country to Taiwan (via company's partner)\ncur.execute(\"SELECT id FROM res_country WHERE code='TW'\")\ntw = cur.fetchone()\nif tw:\n    cur.execute(\"UPDATE res_partner SET country_id=%s WHERE id IN (SELECT partner_id FROM res_company WHERE id=1)\", (tw[0],))\n    print(f\"  - Company country: Taiwan (id={tw[0]})\")\n\n# Set company currency to TWD\ncur.execute(\"SELECT id FROM res_currency WHERE name='TWD'\")\ntwd = cur.fetchone()\nif twd:\n    cur.execute(\"UPDATE res_company SET currency_id=%s WHERE id=1\", (twd[0],))\n    cur.execute(\"UPDATE res_currency SET active=true WHERE name='TWD'\")\n    print(f\"  - Company currency: TWD (id={twd[0]})\")\n\nconn.commit()\ncur.close()\nconn.close()\nprint(\"Taiwan locale configured!\")\nPYEOF\n\necho \"=== Installing pip dependencies for custom modules ===\"\npip3 install --break-system-packages fs==2.4.16 vuefinder-wsgi==1.5.2 munch==4.0.0 cachetools==5.5.2 websockets 2>/dev/null || true\n\necho \"=== Database initialization complete (base only) ===\"\necho \"  Login: admin / admin\"\necho \"  Database: well101\"\necho \"  Install additional apps via Settings > Apps menu\"\n"
+      image: odoo:18.0
+      imagePullPolicy: IfNotPresent
+      name: init-db
+      resources: {}
+      volumeMounts:
+      - mountPath: /etc/odoo/odoo.conf
+        name: odoo-config
+        readOnly: true
+        subPath: odoo.conf
+      - mountPath: /var/lib/odoo
+        name: odoo-data
+      - mountPath: /mnt/extra-addons
+        name: odoo-addons
+  ports:
+    - containerPort: 8069
+      name: odoo-http
+      protocol: TCP
+    - containerPort: 8072
+      name: odoo-lp
+      protocol: TCP
+  livenessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    initialDelaySeconds: 120
+    periodSeconds: 30
+    successThreshold: 1
+    timeoutSeconds: 10
+  readinessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  startupProbe:
+    failureThreshold: 30
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  resources:
+    limits:
+      cpu: '2'
+      memory: 3Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  volumeMounts:
+    - mountPath: /var/lib/odoo
+      name: odoo-data
+    - mountPath: /mnt/extra-addons
+      name: odoo-addons
+    - mountPath: /etc/odoo/odoo.conf
+      name: odoo-config
+      readOnly: true
+      subPath: odoo.conf
+  # Verbatim: order is part of the pod template.
+  volumes:
+    - name: odoo-data
+      persistentVolumeClaim:
+        claimName: odoo-data
+    - name: odoo-addons
+      persistentVolumeClaim:
+        claimName: odoo-addons
+    - configMap:
+        defaultMode: 420
+        name: odoo-config
+      name: odoo-config
+    - configMap:
+        defaultMode: 420
+        name: odoo-nginx-config
+      name: nginx-config
+    - emptyDir:
+        sizeLimit: 500Mi
+      name: nginx-cache
+  service:
+    name: odoo
+    type: ClusterIP
+    labels:
+      app.kubernetes.io/name: odoo
+      app.kubernetes.io/part-of: well-101
+    ports:
+      - name: http
+        port: 8069
+        protocol: TCP
+        targetPort: 8069
+      - name: longpolling
+        port: 8072
+        protocol: TCP
+        targetPort: 8072
+      - name: nginx
+        port: 8080
+        protocol: TCP
+        targetPort: 8080
+
+nginx:
+  enabled: true
+  containerName: nginx
+  image: nginx:1.27-alpine
+  imagePullPolicy: IfNotPresent
+  ports:
+    - containerPort: 8080
+      name: http
+      protocol: TCP
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  volumeMounts:
+    - mountPath: /etc/nginx/nginx.conf
+      name: nginx-config
+      readOnly: true
+      subPath: nginx.conf
+    - mountPath: /tmp/nginx-cache
+      name: nginx-cache
+
+postgres:
+  enabled: true
+  name: postgres
+  containerName: postgres
+  replicas: 1
+  strategy: Recreate
+  image: postgres:16-alpine
+  imagePullPolicy: IfNotPresent
+  selectorLabels:
+    app.kubernetes.io/name: postgres
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: well-101
+  podExtraLabels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: well-101
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  env:
+    - name: POSTGRES_USER
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_USER
+          name: postgres-secret
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_PASSWORD
+          name: postgres-secret
+    - name: POSTGRES_DB
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_DB
+          name: postgres-secret
+    - name: PGDATA
+      value: /var/lib/postgresql/data/pgdata
+  ports:
+    - containerPort: 5432
+      name: postgres
+      protocol: TCP
+  livenessProbe:
+    exec:
+      command:
+      - pg_isready
+      - -U
+      - well101
+      - -d
+      - well101
+    failureThreshold: 3
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  readinessProbe:
+    exec:
+      command:
+      - pg_isready
+      - -U
+      - well101
+      - -d
+      - well101
+    failureThreshold: 3
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    successThreshold: 1
+    timeoutSeconds: 3
+  resources:
+    limits:
+      cpu: '1'
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  volumeMounts:
+    - mountPath: /var/lib/postgresql/data
+      name: postgres-data
+  volumes:
+    - name: postgres-data
+      persistentVolumeClaim:
+        claimName: postgres-data
+  service:
+    name: postgres
+    type: ClusterIP
+    labels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/part-of: well-101
+    ports:
+      - name: postgres
+        port: 5432
+        protocol: TCP
+        targetPort: 5432
+
+tunnel:
+  enabled: true
+  name: cloudflared
+  containerName: cloudflared
+  replicas: 1
+  image: cloudflare/cloudflared:latest
+  imagePullPolicy: Always
+  selectorLabels:
+    app.kubernetes.io/name: cloudflared
+  labels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/part-of: well-101
+  podExtraLabels:
+    app.kubernetes.io/part-of: well-101
+  podAnnotations:
+    kubectl.kubernetes.io/restartedAt: '2026-06-24T16:02:46+08:00'
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  args:
+    - tunnel
+    - --no-autoupdate
+    - --metrics
+    - 0.0.0.0:2000
+    - run
+    - --token
+    - $(TUNNEL_TOKEN)
+  env:
+    - name: TUNNEL_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: TUNNEL_TOKEN
+          name: cloudflared-tunnel-token
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+backup:
+  enabled: true
+  name: pg-backup
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  backoffLimit: 2
+  restartPolicy: OnFailure
+  labels:
+    app.kubernetes.io/component: db-backup
+    app.kubernetes.io/part-of: well-101
+  # Verbatim: the backup command is per-tenant.
+  containers:
+    - command:
+      - sh
+      - -c
+      - "set -euo pipefail\nmkdir -p /backups\n# ── R-1：等待 postgres 可連通 ────────────────────────────────\n# 新 pod 啟動時 NetworkPolicy 的 iptables 規則尚未程式化完成，\n# 此期間封包被 REJECT（pg_dump 收到 Connection refused）→ 產生 0-byte dump。\n# 上限 60 秒（勿縮小：#279/#280 實測該空窗可達 20–30 秒）；逾時以非零碼退出。\ni=0\nuntil pg_isready -h postgres -U well101 -q; do\n  i=$((i+1))\n  if [ \"$i\" -ge 60 ]; then\n    echo \"R-1: postgres 於 60 秒內無法連通，放棄本次備份\" >&2\n    exit 1\n  fi\n  sleep 1\ndone\necho \"R-1: postgres 於第 ${i} 秒可連通\"\n# ─────────────────────────────────────────────────────────────\nOUT=/backups/well101_$(date +%Y%m%d_%H%M%S).pg\nPGPASSWORD=$POSTGRES_PASSWORD pg_dump -h postgres -U well101 -d well101 -Fc -f \"$OUT\"\ntest -s \"$OUT\"\nls -lh \"$OUT\"\nls -t /backups/well101_*.pg | tail -n +8 | xargs -r rm -f || true\n"
+      env:
+      - name: POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            key: POSTGRES_PASSWORD
+            name: postgres-secret
+      image: postgres:16-alpine
+      imagePullPolicy: IfNotPresent
+      name: backup
+      resources:
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      volumeMounts:
+      - mountPath: /backups
+        name: backup
+  volumes:
+    - name: backup
+      persistentVolumeClaim:
+        claimName: odoo-data
