@@ -13,7 +13,18 @@ odoo:
   containerName: odoo
   replicas: 1
   strategy: Recreate
-  image: odoo:18.0
+  # PINNED 2026-09-15 to the digest this tenant was ALREADY RUNNING (18.0-20260609),
+  # so applying it is a version no-op. It replaces the floating "odoo:18.0",
+  # under which the seventeen tenants had already drifted apart: eleven said
+  # `odoo:18.0` while running two builds two months apart, and Docker Hub's
+  # 18.0 had moved on to a third that nobody runs. With IfNotPresent and the
+  # digest pre-pulled onto all four nodes, a reschedule can no longer silently
+  # upgrade this tenant - which for Odoo could mean an unattended database
+  # migration.
+  #
+  # To upgrade deliberately: pick the digest, pre-pull it onto every node the
+  # pod may land on, update this line (and the init-db one), then helm upgrade.
+  image: odoo@sha256:f0d5dcafc72cacea66ae0ee8d7950d436d19d084ffade089f51e14c98b823803
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:

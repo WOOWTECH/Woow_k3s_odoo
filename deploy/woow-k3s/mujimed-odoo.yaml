@@ -13,7 +13,18 @@ odoo:
   containerName: odoo
   replicas: 1
   strategy: Recreate
-  image: odoo:18.0
+  # PINNED 2026-09-15 to the digest this tenant was ALREADY RUNNING (18.0-20260810),
+  # so applying it is a version no-op. It replaces the floating "odoo:18.0",
+  # under which the seventeen tenants had already drifted apart: eleven said
+  # `odoo:18.0` while running two builds two months apart, and Docker Hub's
+  # 18.0 had moved on to a third that nobody runs. With IfNotPresent and the
+  # digest pre-pulled onto all four nodes, a reschedule can no longer silently
+  # upgrade this tenant - which for Odoo could mean an unattended database
+  # migration.
+  #
+  # To upgrade deliberately: pick the digest, pre-pull it onto every node the
+  # pod may land on, update this line (and the init-db one), then helm upgrade.
+  image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:
@@ -78,7 +89,7 @@ odoo:
       - sh
       - -c
       - "set -e\necho \"=== Checking database status ===\"\n\nDB_READY=$(python3 -c \"\nimport psycopg2\ntry:\n    conn = psycopg2.connect(host='mujimed-postgres-svc', dbname='mujimed', user='mujimed', password='__PGPASSWORD__')\n    cur = conn.cursor()\n    cur.execute(\\\"SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='ir_module_module'\\\")\n    count = cur.fetchone()[0]\n    conn.close()\n    print('yes' if count > 0 else 'no')\nexcept:\n    print('no')\n\" 2>/dev/null || echo \"no\")\n\nif [ \"$DB_READY\" = \"yes\" ]; then\n  echo \"Database already initialized. Skipping.\"\n  exit 0\nfi\n\n# Install pip dependencies needed by custom modules\necho \"=== Installing pip dependencies ===\"\npip3 install --break-system-packages requests 2>/dev/null || true\n\necho \"=== Initializing Odoo database 'mujimed' ===\"\necho \"Installing core + custom modules. This may take 10-15 minutes...\"\n\n# Core modules needed by custom addons\nMODULES=\"base,web,mail,contacts,portal\"\nMODULES=\"$MODULES,website,calendar,resource,payment,product,sale,stock\"\nMODULES=\"$MODULES,loyalty,sale_loyalty,website_sale_loyalty,website_sale_stock\"\nMODULES=\"$MODULES,im_livechat,point_of_sale\"\n\n# Custom modules - LINE\nMODULES=\"$MODULES,woow_line_base,woow_odoo_line_liff,woow_odoo_livechat_line\"\n\n# Custom modules - Website auth\nMODULES=\"$MODULES,woow_website_auth\"\n\n# Custom modules - Reservation\nMODULES=\"$MODULES,reservation_module\"\n\n# Custom modules - Loyalty / Member Center\nMODULES=\"$MODULES,woow_loyalty_consign,woow_loyalty_consign_pos,woow_member_center\"\nMODULES=\"$MODULES,woow_mc_consign,woow_mc_coupon,woow_mc_ewallet\"\nMODULES=\"$MODULES,woow_mc_gift_card,woow_mc_loyalty\"\nMODULES=\"$MODULES,woow_consign_booking\"\n\n# Custom modules - Clinic\nMODULES=\"$MODULES,woow_medical_patient,woow_medical_physician,woow_medical_record\"\n\necho \"  Modules: $MODULES\"\n\nodoo -d mujimed \\\n  -i $MODULES \\\n  --load-language=zh_TW \\\n  --without-demo=all \\\n  --stop-after-init \\\n  -c /etc/odoo/odoo.conf\n\necho \"=== Configuring Taiwan locale settings ===\"\npython3 << 'PYEOF'\nimport psycopg2\n\nconn = psycopg2.connect(host='mujimed-postgres-svc', dbname='mujimed', user='mujimed', password='__PGPASSWORD__')\ncur = conn.cursor()\n\n# Admin: set lang/tz via partner (Odoo 18 pattern)\ncur.execute(\"UPDATE res_partner SET lang='zh_TW', tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users WHERE login='admin')\")\nprint(\"  - Admin: lang=zh_TW, tz=Asia/Taipei\")\n\n# Set all user partners timezone\ncur.execute(\"UPDATE res_partner SET tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users) AND (tz IS NULL OR tz='' OR tz='Europe/Brussels')\")\n\n# Company country -> Taiwan\ncur.execute(\"SELECT id FROM res_country WHERE code='TW'\")\ntw = cur.fetchone()\nif tw:\n    cur.execute(\"UPDATE res_partner SET country_id=%s WHERE id IN (SELECT partner_id FROM res_company WHERE id=1)\", (tw[0],))\n    print(f\"  - Company country: Taiwan (id={tw[0]})\")\n\n# Company currency -> TWD\ncur.execute(\"SELECT id FROM res_currency WHERE name='TWD'\")\ntwd = cur.fetchone()\nif twd:\n    cur.execute(\"UPDATE res_company SET currency_id=%s WHERE id=1\", (twd[0],))\n    cur.execute(\"UPDATE res_currency SET active=true WHERE name='TWD'\")\n    print(f\"  - Company currency: TWD (id={twd[0]})\")\n\n# Company name\ncur.execute(\"UPDATE res_company SET name='沐淨醫美' WHERE id=1\")\ncur.execute(\"UPDATE res_partner SET name='沐淨醫美' WHERE id IN (SELECT partner_id FROM res_company WHERE id=1)\")\nprint(\"  - Company name: 沐淨醫美\")\n\n# Website name\ncur.execute(\"UPDATE website SET name='沐淨醫美'\")\nprint(\"  - Website name: 沐淨醫美\")\n\n# Freeze web.base.url to HTTPS\ncur.execute(\"INSERT INTO ir_config_parameter (key, value, create_uid, write_uid, create_date, write_date) VALUES ('web.base.url', 'https://mujimed-odoo.woowtech.io', 1, 1, NOW(), NOW()) ON CONFLICT (key) DO UPDATE SET value='https://mujimed-odoo.woowtech.io'\")\ncur.execute(\"INSERT INTO ir_config_parameter (key, value, create_uid, write_uid, create_date, write_date) VALUES ('web.base.url.freeze', 'True', 1, 1, NOW(), NOW()) ON CONFLICT (key) DO UPDATE SET value='True'\")\nprint(\"  - web.base.url: https (frozen)\")\n\nconn.commit()\ncur.close()\nconn.close()\nprint(\"Taiwan locale configured!\")\nPYEOF\n\necho \"=== Database initialization complete ===\"\necho \"  Login: admin / admin\"\necho \"  Database: mujimed\"\n"
-      image: odoo:18.0
+      image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
       imagePullPolicy: IfNotPresent
       name: init-db
       resources: {}
