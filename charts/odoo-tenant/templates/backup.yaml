@@ -1,5 +1,36 @@
 {{- if .Values.backup.enabled }}
-{{- /* Nightly pg_dump. Three of the seventeen tenants have none. */ -}}
+{{- /*
+Nightly pg_dump.
+
+Three tenants had NO backup at all until 2026-09-15 - not a broken schedule, no
+CronJob and no volume to write to. `backup.persistence.create` renders the claim
+for them; tenants that already had one leave it false and name the existing claim.
+
+The dump script must wait for PostgreSQL to answer before running pg_dump. That
+is not defensive padding: where a NetworkPolicy is in force, a freshly scheduled
+pod can have its packets REJECTed for 20-30s while iptables rules are still
+being programmed, and pg_dump then writes a 0-byte file and exits 0. The guard
+plus `test -s` is what turns that into a loud failure instead of a silent one.
+*/ -}}
+{{- if .Values.backup.persistence.create }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.backup.persistence.claimName }}
+  namespace: {{ include "odoo-tenant.ns" . }}
+  {{- if .Values.backup.persistence.keep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.backup.persistence.accessMode }}
+  storageClassName: {{ .Values.backup.persistence.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.persistence.size }}
+{{- end }}
 ---
 apiVersion: batch/v1
 kind: CronJob

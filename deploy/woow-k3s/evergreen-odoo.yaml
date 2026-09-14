@@ -339,6 +339,61 @@ tunnel:
       cpu: 50m
       memory: 64Mi
 
+# ADDED 2026-09-15. This tenant had NO backup at all - no CronJob and no volume
+# to write to - while five of its siblings had been dumping nightly for months.
+# Unlike theirs, the database name and user are read from the Secret rather than
+# hardcoded in the script.
 backup:
-  # This tenant has no backup CronJob.
-  enabled: false
+  enabled: true
+  name: pg-backup
+  schedule: 30 3 * * *
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  backoffLimit: 2
+  restartPolicy: OnFailure
+  persistence:
+    create: true
+    claimName: evergreen-backup-pvc
+    storageClassName: longhorn
+    accessMode: ReadWriteOnce
+    size: 20Gi
+    keep: true
+  containers:
+  - name: backup
+    image: postgres:16-alpine
+    imagePullPolicy: IfNotPresent
+    command:
+    - /bin/sh
+    - -c
+    - "set -euo pipefail\nmkdir -p /backups\n\n# Wait for PostgreSQL to actually answer before dumping. Where a NetworkPolicy\n# is in force a freshly scheduled pod can have its packets REJECTed for 20-30s\n# while iptables rules are still being programmed; pg_dump then writes a 0-byte\n# file and exits 0. Do not shorten this.\ni=0\nuntil pg_isready -h evergreen-postgres-svc -U \"$POSTGRES_USER\" -q; do\n  i=$((i+1))\n  if [ \"$i\" -ge 60 ]; then\n    echo \"postgres did not answer within 60s, skipping this backup\" >&2\n    exit 1\n  fi\n  sleep 1\ndone\necho \"postgres answered after ${i}s\"\n\nOUT=/backups/evergreen_$(date +%Y%m%d_%H%M%S).pg\nPGPASSWORD=$POSTGRES_PASSWORD pg_dump -h evergreen-postgres-svc -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -Fc -f \"$OUT\"\n# A dump that exists but is empty is the failure this whole job guards against.\ntest -s \"$OUT\"\nls -lh \"$OUT\"\n# Keep the last 7.\nls -t /backups/evergreen_*.pg | tail -n +8 | xargs -r rm -f || true\n"
+    env:
+    - name: POSTGRES_USER
+      valueFrom:
+        secretKeyRef:
+          name: evergreen-postgres-secret
+          key: POSTGRES_USER
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: evergreen-postgres-secret
+          key: POSTGRES_PASSWORD
+    - name: POSTGRES_DB
+      valueFrom:
+        secretKeyRef:
+          name: evergreen-postgres-secret
+          key: POSTGRES_DB
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    volumeMounts:
+    - name: backup-storage
+      mountPath: /backups
+  volumes:
+  - name: backup-storage
+    persistentVolumeClaim:
+      claimName: evergreen-backup-pvc

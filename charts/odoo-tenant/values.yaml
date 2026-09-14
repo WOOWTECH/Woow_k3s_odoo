@@ -131,8 +131,18 @@ tunnel:
   resources: {}
 
 backup:
-  # Three of the seventeen tenants have no backup CronJob at all.
+  # Three tenants had none at all until 2026-09-15.
   enabled: true
+  persistence:
+    # true renders the claim the dumps are written to. Tenants that already had
+    # a backup volume leave this false and name the existing claim below.
+    create: false
+    claimName: ""
+    storageClassName: longhorn
+    accessMode: ReadWriteOnce
+    size: 20Gi
+    # Dumps must survive `helm uninstall`.
+    keep: true
   name: pg-backup
   schedule: "0 2 * * *"
   concurrencyPolicy: ""
