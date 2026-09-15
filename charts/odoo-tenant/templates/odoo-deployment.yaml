@@ -61,7 +61,19 @@ spec:
       {{- end }}
       {{- with .Values.odoo.initContainers }}
       initContainers:
-        {{- toYaml . | nindent 8 }}
+        {{- /*
+             Six tenants' init-db script opens its own psycopg2 connection and so
+             carries the database password inside the script text. The values file
+             holds __PGPASSWORD__ there instead of the real one, and it is put back
+             here at render time from --set-string pgPassword=..., so the rendered
+             pod template still matches the live object byte for byte.
+             A tenant whose script does not need it renders untouched.
+        */}}
+        {{- $ic := toYaml . }}
+        {{- if contains "__PGPASSWORD__" $ic }}
+        {{- $ic = replace "__PGPASSWORD__" (required "pgPassword is required: this tenant's init-db script embeds the database password. Pass it with --set-string pgPassword=... and never commit the real value." $.Values.pgPassword) $ic }}
+        {{- end }}
+        {{- $ic | nindent 8 }}
       {{- end }}
       containers:
       - name: {{ .Values.odoo.containerName }}

@@ -1,3 +1,8 @@
+# Substituted into any init container script containing __PGPASSWORD__ (see
+# templates/odoo-deployment.yaml). Must stay empty here: the real value is
+# passed with --set-string at install time, never committed.
+pgPassword: ""
+
 # Defaults for the odoo-tenant chart.
 #
 # This chart reproduces Odoo tenants that were applied by hand with kubectl.
