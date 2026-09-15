@@ -11,9 +11,16 @@ tenant: woowtech
 
 odoo:
   containerName: odoo
+  # Stopped since 2026-08-25. Raised to 1 only for the upgrade test above.
   replicas: 0
   strategy: Recreate
-  image: odoo:18.0
+  # PINNED 2026-09-15 to the 20260810 build. This tenant is stopped, so unlike
+  # the other sixteen there was no "build it is already running" to pin to - it
+  # was used to TEST whether moving between Odoo 18.0 patch builds touches the
+  # database (it does not; see the commit). It is pinned rather than left on the
+  # floating tag so that whoever starts it gets a known build instead of
+  # whatever Docker Hub points at that day.
+  image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:
@@ -58,7 +65,7 @@ odoo:
       command:
       - sh
       - -c
-      image: odoo:18.0
+      image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
       imagePullPolicy: IfNotPresent
       name: install-pip-deps
       resources:
