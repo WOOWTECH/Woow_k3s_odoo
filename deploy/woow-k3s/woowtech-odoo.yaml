@@ -1,4 +1,4 @@
-# Instance values for the wowcasa-odoo Odoo tenant on woow-k3s.
+# Instance values for the woowtech-odoo Odoo tenant on woow-k3s.
 # Generated from the live objects: the render reproduces the running pod
 # templates exactly, so adopting them restarts nothing.
 #
@@ -7,28 +7,19 @@
 #
 # SAFETY: never set `namespace:` here - placement is `-n` only.
 
-tenant: wowcasa
+tenant: woowtech
 
 odoo:
   containerName: odoo
-  replicas: 1
+  replicas: 0
   strategy: Recreate
-  image: odoo@sha256:f0d5dcafc72cacea66ae0ee8d7950d436d19d084ffade089f51e14c98b823803
+  image: odoo:18.0
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:
-    app.kubernetes.io/name: odoo
-    app.kubernetes.io/part-of: wowcasa
-  labels:
-    app.kubernetes.io/name: odoo
-    app.kubernetes.io/part-of: wowcasa
-    app.kubernetes.io/version: '18.0'
-  podExtraLabels:
-    app.kubernetes.io/version: '18.0'
+    app: woowtech-odoo
   podAnnotations:
-    kubectl.kubernetes.io/restartedAt: '2026-06-25T17:45:34+08:00'
-  nodeSelector:
-    node-role.kubernetes.io/control-plane: 'true'
+    kubectl.kubernetes.io/restartedAt: '2026-08-25T09:26:56+08:00'
   podSecurityContext:
     fsGroup: 101
   # Verbatim - this tenant's provisioning script.
@@ -39,7 +30,7 @@ odoo:
       - chown -R 101:101 /var/lib/odoo
       image: busybox:1.36
       imagePullPolicy: IfNotPresent
-      name: fix-permissions
+      name: fix-perms
       resources:
         limits:
           cpu: 50m
@@ -48,72 +39,78 @@ odoo:
         runAsUser: 0
       volumeMounts:
       - mountPath: /var/lib/odoo
-        name: odoo-data
+        name: data
     - command:
       - sh
       - -c
-      - "echo \"Waiting for PostgreSQL...\"\nuntil nc -z wowcasa-postgres-svc 5432; do\n  echo \"  not ready - sleeping\"\n  sleep 2\ndone\necho \"PostgreSQL ready!\"\n"
+      - until nc -z woowtech-postgres-svc 5432; do sleep 2; done
       image: busybox:1.36
       imagePullPolicy: IfNotPresent
-      name: wait-for-postgres
+      name: wait-pg
       resources:
         limits:
           cpu: 50m
           memory: 32Mi
-        requests:
-          cpu: 10m
-          memory: 16Mi
-    - command:
+    - args:
+      - 'cat /scripts/install.sh | sh
+    
+        '
+      command:
       - sh
       - -c
-      - cp -a /usr/lib/python3/dist-packages/odoo/addons/bus/* /tmp/bus-patch/ && sed -i "s/'sec-websocket-version', 'upgrade', 'origin',/'sec-websocket-version', 'upgrade',/" /tmp/bus-patch/websocket.py && echo "Patched websocket origin check into shared volume"
-      image: odoo@sha256:f0d5dcafc72cacea66ae0ee8d7950d436d19d084ffade089f51e14c98b823803
+      image: odoo:18.0
       imagePullPolicy: IfNotPresent
-      name: patch-websocket-origin
+      name: install-pip-deps
       resources:
         limits:
-          cpu: 50m
-          memory: 64Mi
-        requests:
-          cpu: 10m
-          memory: 32Mi
+          cpu: '1'
+          memory: 1Gi
       securityContext:
         runAsUser: 0
       volumeMounts:
-      - mountPath: /tmp/bus-patch
-        name: ws-patch
+      - mountPath: /mnt/extra-addons
+        name: addons
+      - mountPath: /scripts
+        name: pip-scripts
+      - mountPath: /usr/local/lib/python3.12/dist-packages
+        name: pip-packages
   command:
     - bash
     - -c
-    - cp /etc/odoo/odoo.conf /tmp/odoo.conf && sed -i "s|db_password = .*|db_password = $PASSWORD|" /tmp/odoo.conf && sed -i "s|admin_passwd = .*|admin_passwd = $ADMIN_PASSWORD|" /tmp/odoo.conf && exec odoo --config=/tmp/odoo.conf
+    - cp /etc/odoo/odoo.conf /tmp/odoo.conf && sed -i "s|db_password = .*|db_password = $PASSWORD|" /tmp/odoo.conf && sed -i "s|admin_passwd = .*|admin_passwd = $ADMIN_PASSWORD|" /tmp/odoo.conf && sed -i "s|smtp_password = .*|smtp_password = $SMTP_PASSWORD|" /tmp/odoo.conf && exec odoo --config=/tmp/odoo.conf
   env:
     - name: HOST
-      value: wowcasa-postgres-svc
+      value: woowtech-postgres-svc
     - name: PORT
       value: '5432'
     - name: USER
       valueFrom:
         secretKeyRef:
           key: POSTGRES_USER
-          name: wowcasa-postgres-secret
+          name: woowtech-postgres-secret
     - name: PASSWORD
       valueFrom:
         secretKeyRef:
           key: POSTGRES_PASSWORD
-          name: wowcasa-postgres-secret
-    - name: PIP_BREAK_SYSTEM_PACKAGES
-      value: '1'
+          name: woowtech-postgres-secret
     - name: ADMIN_PASSWORD
       valueFrom:
         secretKeyRef:
           key: ADMIN_PASSWORD
-          name: wowcasa-postgres-secret
+          name: woowtech-postgres-secret
+    - name: SMTP_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: SMTP_PASSWORD
+          name: woowtech-postgres-secret
+    - name: PIP_BREAK_SYSTEM_PACKAGES
+      value: '1'
   ports:
     - containerPort: 8069
-      name: odoo-http
+      name: http
       protocol: TCP
     - containerPort: 8072
-      name: odoo-lp
+      name: lp
       protocol: TCP
   livenessProbe:
     failureThreshold: 3
@@ -121,7 +118,7 @@ odoo:
       path: /web/health
       port: 8069
       scheme: HTTP
-    initialDelaySeconds: 120
+    initialDelaySeconds: 180
     periodSeconds: 30
     successThreshold: 1
     timeoutSeconds: 10
@@ -140,59 +137,62 @@ odoo:
       path: /web/health
       port: 8069
       scheme: HTTP
-    initialDelaySeconds: 30
+    initialDelaySeconds: 60
     periodSeconds: 15
     successThreshold: 1
-    timeoutSeconds: 5
+    timeoutSeconds: 1
   resources:
     limits:
-      cpu: '2'
+      cpu: '4'
       memory: 6Gi
     requests:
-      cpu: 500m
-      memory: 1Gi
+      cpu: '1'
+      memory: 2Gi
   volumeMounts:
     - mountPath: /var/lib/odoo
-      name: odoo-data
+      name: data
     - mountPath: /mnt/extra-addons
-      name: odoo-addons
+      name: addons
     - mountPath: /etc/odoo/odoo.conf
-      name: odoo-config
+      name: config
       readOnly: true
       subPath: odoo.conf
-    - mountPath: /usr/lib/python3/dist-packages/odoo/addons/bus
-      name: ws-patch
+    - mountPath: /usr/local/lib/python3.12/dist-packages
+      name: pip-packages
   # Verbatim: order is part of the pod template.
   volumes:
-    - name: odoo-data
+    - name: data
       persistentVolumeClaim:
-        claimName: wowcasa-odoo-data
-    - name: odoo-addons
+        claimName: woowtech-odoo-data
+    - name: addons
       persistentVolumeClaim:
-        claimName: wowcasa-odoo-addons
+        claimName: woowtech-odoo-addons
     - configMap:
         defaultMode: 420
-        name: wowcasa-odoo-config
-      name: odoo-config
+        name: woowtech-odoo-config
+      name: config
     - configMap:
         defaultMode: 420
-        name: wowcasa-nginx-config
-      name: nginx-config
-    - name: nginx-cache
+        name: woowtech-nginx-config
+      name: nginx-conf
+    - name: cache
       persistentVolumeClaim:
-        claimName: wowcasa-nginx-cache-pvc
-    - emptyDir: {}
-      name: ws-patch
+        claimName: woowtech-nginx-cache
+    - configMap:
+        defaultMode: 420
+        name: woowtech-pip-deps
+      name: pip-scripts
+    - emptyDir:
+        sizeLimit: 500Mi
+      name: pip-packages
   service:
     type: ClusterIP
-    labels:
-      {}
     ports:
       - name: http
         port: 8069
         protocol: TCP
         targetPort: 8069
-      - name: longpolling
+      - name: lp
         port: 8072
         protocol: TCP
         targetPort: 8072
@@ -208,69 +208,62 @@ nginx:
   imagePullPolicy: IfNotPresent
   ports:
     - containerPort: 8080
-      name: nginx-http
       protocol: TCP
   resources:
     limits:
       cpu: 500m
-      memory: 256Mi
+      memory: 512Mi
     requests:
       cpu: 50m
       memory: 64Mi
   volumeMounts:
     - mountPath: /etc/nginx/nginx.conf
-      name: nginx-config
+      name: nginx-conf
       readOnly: true
       subPath: nginx.conf
     - mountPath: /var/cache/nginx
-      name: nginx-cache
+      name: cache
 
 postgres:
   enabled: true
   containerName: postgres
   replicas: 1
   strategy: Recreate
-  image: postgres:16-alpine
+  image: pgvector/pgvector:pg17
   imagePullPolicy: IfNotPresent
   selectorLabels:
-    app.kubernetes.io/name: postgres
-    app.kubernetes.io/part-of: wowcasa
-  labels:
-    {}
-  podAnnotations:
-    kubectl.kubernetes.io/restartedAt: '2026-06-25T17:45:56+08:00'
+    app: woowtech-postgres
   nodeSelector:
-    node-role.kubernetes.io/control-plane: 'true'
+    kubernetes.io/hostname: ubuntuserver-z0v3w
   env:
     - name: POSTGRES_USER
       valueFrom:
         secretKeyRef:
           key: POSTGRES_USER
-          name: wowcasa-postgres-secret
+          name: woowtech-postgres-secret
     - name: POSTGRES_PASSWORD
       valueFrom:
         secretKeyRef:
           key: POSTGRES_PASSWORD
-          name: wowcasa-postgres-secret
+          name: woowtech-postgres-secret
     - name: POSTGRES_DB
       valueFrom:
         secretKeyRef:
           key: POSTGRES_DB
-          name: wowcasa-postgres-secret
+          name: woowtech-postgres-secret
     - name: PGDATA
       value: /var/lib/postgresql/data/pgdata
   ports:
     - containerPort: 5432
-      name: postgres
       protocol: TCP
   livenessProbe:
     exec:
       command:
       - pg_isready
       - -U
-      - wowcasa
+      - woow-odoo
       - -d
-      - wowcasa
+      - odoo
     failureThreshold: 3
     initialDelaySeconds: 30
     periodSeconds: 10
@@ -281,32 +274,36 @@ postgres:
       command:
       - pg_isready
       - -U
-      - wowcasa
+      - woow-odoo
       - -d
-      - wowcasa
+      - odoo
     failureThreshold: 3
     initialDelaySeconds: 5
     periodSeconds: 5
     successThreshold: 1
-    timeoutSeconds: 3
+    timeoutSeconds: 1
   resources:
     limits:
-      cpu: '1'
-      memory: 1Gi
+      cpu: '2'
+      memory: 2Gi
     requests:
-      cpu: 100m
-      memory: 256Mi
+      cpu: 500m
+      memory: 1Gi
   volumeMounts:
     - mountPath: /var/lib/postgresql/data
-      name: postgres-data
+      name: data
+    - mountPath: /docker-entrypoint-initdb.d
+      name: initdb
   volumes:
-    - name: postgres-data
+    - name: data
       persistentVolumeClaim:
-        claimName: wowcasa-db-pvc
+        claimName: woowtech-db-pvc
+    - configMap:
+        defaultMode: 420
+        name: postgres-initdb
+      name: initdb
   service:
     type: ClusterIP
-    labels:
-      {}
     ports:
       - port: 5432
         protocol: TCP
@@ -319,12 +316,9 @@ tunnel:
   image: cloudflare/cloudflared:latest
   imagePullPolicy: Always
   selectorLabels:
-    app.kubernetes.io/name: cloudflared
-    app.kubernetes.io/part-of: wowcasa
-  labels:
-    {}
+    app: woowtech-cloudflared
   podAnnotations:
-    kubectl.kubernetes.io/restartedAt: '2026-06-25T14:01:05+08:00'
+    kubectl.kubernetes.io/restartedAt: '2026-06-25T19:42:56+08:00'
   nodeSelector:
     node-role.kubernetes.io/control-plane: 'true'
   strategy:
@@ -345,7 +339,7 @@ tunnel:
       valueFrom:
         secretKeyRef:
           key: CF_TUNNEL_TOKEN
-          name: wowcasa-secrets
+          name: woowtech-secrets
   resources:
     limits:
       cpu: 200m
@@ -355,5 +349,43 @@ tunnel:
       memory: 64Mi
 
 backup:
-  # This tenant has no backup CronJob.
-  enabled: false
+  enabled: true
+  name: pg-backup
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  backoffLimit: 2
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  restartPolicy: OnFailure
+  labels:
+    app.kubernetes.io/component: db-backup
+    app.kubernetes.io/part-of: woowtech
+  # Verbatim: the backup command is per-tenant.
+  containers:
+    - command:
+      - sh
+      - -c
+      - "set -euo pipefail\nmkdir -p /backups\n# ── R-1：等待 postgres 可連通 ────────────────────────────────\n# 新 pod 啟動時 NetworkPolicy 的 iptables 規則尚未程式化完成，\n# 此期間封包被 REJECT（pg_dump 收到 Connection refused）→ 產生 0-byte dump。\n# 上限 60 秒（勿縮小：#279/#280 實測該空窗可達 20–30 秒）；逾時以非零碼退出。\ni=0\nuntil pg_isready -h woowtech-postgres-svc -U woow-odoo -q; do\n  i=$((i+1))\n  if [ \"$i\" -ge 60 ]; then\n    echo \"R-1: postgres 於 60 秒內無法連通，放棄本次備份\" >&2\n    exit 1\n  fi\n  sleep 1\ndone\necho \"R-1: postgres 於第 ${i} 秒可連通\"\n# ─────────────────────────────────────────────────────────────\nOUT=/backups/odoo_$(date +%Y%m%d_%H%M%S).pg\nPGPASSWORD=$POSTGRES_PASSWORD pg_dump -h woowtech-postgres-svc -U woow-odoo -d odoo -Fc -f \"$OUT\"\ntest -s \"$OUT\"\nls -lh \"$OUT\"\nls -t /backups/odoo_*.pg | tail -n +8 | xargs -r rm -f || true\n"
+      env:
+      - name: POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            key: POSTGRES_PASSWORD
+            name: woowtech-postgres-secret
+      image: postgres:17-alpine
+      imagePullPolicy: IfNotPresent
+      name: backup
+      resources:
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      volumeMounts:
+      - mountPath: /backups
+        name: backup
+  volumes:
+    - name: backup
+      persistentVolumeClaim:
+        claimName: woowtech-backup-pvc

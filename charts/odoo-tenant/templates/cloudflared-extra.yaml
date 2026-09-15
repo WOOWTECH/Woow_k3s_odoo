@@ -1,0 +1,82 @@
+{{- /*
+Additional Cloudflare tunnels beyond the tenant's main one.
+
+One tenant runs two independent tunnels in the same namespace, with separate
+tokens and separate Secrets - a second project's hostnames were published from
+the same cluster. Rather than reshape `tunnel` into a map and churn sixteen
+values files that each have exactly one, extra tunnels are listed here.
+
+Same rule as the main tunnel: the token is a credential. These all read it from
+a Secret via env, which is the shape to keep.
+*/ -}}
+{{- range $t := .Values.extraTunnels }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ required "each entry in extraTunnels needs a name" $t.name }}
+  namespace: {{ include "odoo-tenant.ns" $ }}
+  {{- with $t.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ $t.replicas | default 1 }}
+  {{- with $t.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- if $t.selectorLabels }}
+      {{- toYaml $t.selectorLabels | nindent 6 }}
+      {{- else }}
+      app: {{ $t.name }}
+      {{- end }}
+  template:
+    metadata:
+      {{- with $t.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- if $t.selectorLabels }}
+        {{- toYaml $t.selectorLabels | nindent 8 }}
+        {{- else }}
+        app: {{ $t.name }}
+        {{- end }}
+        {{- with $t.podExtraLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with $t.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: {{ $t.containerName | default "cloudflared" }}
+        image: {{ $t.image | default $.Values.tunnel.image }}
+        imagePullPolicy: {{ $t.imagePullPolicy | default $.Values.tunnel.imagePullPolicy }}
+        {{- with $t.args }}
+        args:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with $t.env }}
+        env:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with $t.lifecycle }}
+        lifecycle:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $t.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $t.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          {{- toYaml ($t.resources | default dict) | nindent 10 }}
+{{- end }}

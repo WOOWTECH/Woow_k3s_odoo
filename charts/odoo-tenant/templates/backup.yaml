@@ -43,6 +43,18 @@ metadata:
   {{- end }}
 spec:
   schedule: {{ .Values.backup.schedule | quote }}
+  {{- /*
+  These three are easy to lose and worth keeping. startingDeadlineSeconds skips
+  a run that the controller missed by more than its window instead of firing it
+  late; activeDeadlineSeconds kills a dump that hangs rather than letting it run
+  until the next one; ttlSecondsAfterFinished reaps finished Jobs. Every live
+  tenant that had a backup carried all three, and the chart did not describe
+  them - so a CronJob recreated from the chart alone would have come back
+  without them.
+  */}}
+  {{- with .Values.backup.startingDeadlineSeconds }}
+  startingDeadlineSeconds: {{ . }}
+  {{- end }}
   {{- with .Values.backup.concurrencyPolicy }}
   concurrencyPolicy: {{ . }}
   {{- end }}
@@ -56,6 +68,12 @@ spec:
     spec:
       {{- with .Values.backup.backoffLimit }}
       backoffLimit: {{ . }}
+      {{- end }}
+      {{- with .Values.backup.activeDeadlineSeconds }}
+      activeDeadlineSeconds: {{ . }}
+      {{- end }}
+      {{- with .Values.backup.ttlSecondsAfterFinished }}
+      ttlSecondsAfterFinished: {{ . }}
       {{- end }}
       template:
         spec:

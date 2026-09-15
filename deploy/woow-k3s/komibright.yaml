@@ -1,4 +1,4 @@
-# Instance values for the torchmedia Odoo tenant on woow-k3s.
+# Instance values for the komibright Odoo tenant on woow-k3s.
 # Generated from the live objects: the render reproduces the running pod
 # templates exactly, so adopting them restarts nothing.
 #
@@ -7,7 +7,7 @@
 #
 # SAFETY: never set `namespace:` here - placement is `-n` only.
 
-tenant: torchmedia
+tenant: komibright
 
 odoo:
   containerName: odoo
@@ -18,13 +18,13 @@ odoo:
   # IMMUTABLE on the live Deployment.
   selectorLabels:
     app.kubernetes.io/component: application
-    app.kubernetes.io/name: torchmedia-odoo
+    app.kubernetes.io/name: komibright
   labels:
     app.kubernetes.io/component: application
-    app.kubernetes.io/name: torchmedia-odoo
-    app.kubernetes.io/part-of: torchmedia-odoo
+    app.kubernetes.io/name: komibright
+    app.kubernetes.io/part-of: komibright
   podAnnotations:
-    kubectl.kubernetes.io/restartedAt: '2026-06-19T15:32:01+08:00'
+    kubectl.kubernetes.io/restartedAt: '2026-09-12T04:09:38+08:00'
   nodeSelector:
     node-role.kubernetes.io/control-plane: 'true'
   podSecurityContext:
@@ -50,7 +50,7 @@ odoo:
     - command:
       - sh
       - -c
-      - "echo \"Waiting for PostgreSQL...\"\nuntil nc -z torchmedia-postgres-svc 5432; do\n  echo \"  not ready - sleeping\"\n  sleep 2\ndone\necho \"PostgreSQL ready!\"\n"
+      - "echo \"Waiting for PostgreSQL...\"\nuntil nc -z komibright-postgres-svc 5432; do\n  echo \"  not ready - sleeping\"\n  sleep 2\ndone\necho \"PostgreSQL ready!\"\n"
       image: busybox:1.36
       imagePullPolicy: IfNotPresent
       name: wait-for-postgres
@@ -58,32 +58,62 @@ odoo:
         limits:
           cpu: 50m
           memory: 32Mi
+    - command:
+      - sh
+      - -c
+      - "set -e\nADDONS=\"/mnt/extra-addons\"\nclone_module() {\n  local REPO=\"$1\" DIR=\"$2\"\n  local URL=\"https://x-access-token:${GH_TOKEN}@github.com/WOOWTECH/${REPO}.git\"\n  echo \"[clone] $DIR\"\n  git clone --depth 1 \"$URL\" \"/tmp/$DIR\" 2>&1\n  if [ -f \"/tmp/$DIR/__manifest__.py\" ]; then\n    cp -r \"/tmp/$DIR\" \"$ADDONS/$DIR\"\n    echo \"[ok] $DIR\"\n  fi\n}\nclone_module \"woow_line_base\" \"woow_line_base\"\nclone_module \"Woow_odoo_line_liff\" \"woow_odoo_line_liff\"\nclone_module \"woow_odoo_livechat_line\" \"woow_odoo_livechat_line\"\n\necho \"=== Cloning ECPay modules ===\"\ngit clone --depth 1 \"https://x-access-token:${GH_TOKEN}@github.com/WOOWTECH/ecpay_odoo18.git\" \"/tmp/ecpay_odoo18\" 2>&1\nfor mod in ecpay_invoice_tw ecpay_invoice_website payment_ecpay payment_ecpay_ecpg; do\n  if [ -f \"/tmp/ecpay_odoo18/$mod/__manifest__.py\" ]; then\n    cp -r \"/tmp/ecpay_odoo18/$mod\" \"$ADDONS/$mod\"\n    echo \"[ok] $mod\"\n  else\n    echo \"[WARN] $mod missing __manifest__.py\"\n  fi\ndone\n\necho \"=== Addons directory ===\"\nls -la \"$ADDONS/\"\n"
+      env:
+      - name: GH_TOKEN
+        valueFrom:
+          secretKeyRef:
+            key: token
+            name: github-token
+      image: alpine/git:latest
+      imagePullPolicy: Always
+      name: clone-addons
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
         requests:
-          cpu: 10m
-          memory: 16Mi
+          cpu: 100m
+          memory: 128Mi
+      volumeMounts:
+      - mountPath: /mnt/extra-addons
+        name: extra-addons
   command:
     - bash
     - -c
-    - 'echo "Starting Odoo server..."
+    - 'echo "Installing extra pip packages..."
+    
+      pip install --break-system-packages -q python-barcode qrcode qifparse ofxparse openpyxl pycryptodomex 2>&1 | tail -1
+    
+      echo "Applying startup patches..."
+    
+      python3 /opt/patches/patch-templates.py
+    
+      echo "Starting Odoo server..."
     
       exec odoo --config=/etc/odoo/odoo.conf
     
       '
   env:
     - name: HOST
-      value: torchmedia-postgres-svc
+      value: komibright-postgres-svc
     - name: PORT
       value: '5432'
     - name: USER
       valueFrom:
         secretKeyRef:
           key: POSTGRES_USER
-          name: torchmedia-db-secret
+          name: komibright-db-secret
     - name: PASSWORD
       valueFrom:
         secretKeyRef:
           key: POSTGRES_PASSWORD
-          name: torchmedia-db-secret
+          name: komibright-db-secret
+    - name: PIP_BREAK_SYSTEM_PACKAGES
+      value: '1'
   ports:
     - containerPort: 8069
       name: http
@@ -131,27 +161,46 @@ odoo:
       readOnly: true
     - mountPath: /var/lib/odoo
       name: odoo-filestore
+    - mountPath: /mnt/extra-addons
+      name: extra-addons
+    - mountPath: /opt/patches
+      name: startup-patches
+      readOnly: true
+    - mountPath: /usr/lib/python3/dist-packages/odoo/addons/web/static/src/core/templates.js
+      name: patched-templates
+      readOnly: true
+      subPath: templates.js
   # Verbatim: order is part of the pod template.
   volumes:
     - configMap:
         defaultMode: 420
-        name: torchmedia-odoo-config
+        name: komibright-odoo-config
       name: odoo-config
     - name: odoo-filestore
       persistentVolumeClaim:
-        claimName: torchmedia-filestore-pvc
+        claimName: komibright-filestore-pvc
     - configMap:
         defaultMode: 420
-        name: torchmedia-nginx-config
+        name: komibright-nginx-config
       name: nginx-config
     - name: nginx-cache
       persistentVolumeClaim:
-        claimName: torchmedia-nginx-cache-pvc
+        claimName: komibright-nginx-cache-pvc
+    - emptyDir: {}
+      name: extra-addons
+    - configMap:
+        defaultMode: 420
+        name: odoo-startup-patches
+      name: startup-patches
+    - configMap:
+        defaultMode: 420
+        name: odoo-patched-templates
+      name: patched-templates
   service:
     type: ClusterIP
     labels:
       app.kubernetes.io/component: application
-      app.kubernetes.io/part-of: torchmedia-odoo
+      app.kubernetes.io/part-of: komibright
     ports:
       - name: http
         port: 8069
@@ -195,15 +244,15 @@ postgres:
   containerName: postgres
   replicas: 1
   strategy: Recreate
-  image: pgvector/pgvector:pg17
+  image: postgres:16-alpine
   imagePullPolicy: IfNotPresent
   selectorLabels:
     app.kubernetes.io/component: database
-    app.kubernetes.io/name: torchmedia-odoo
+    app.kubernetes.io/name: komibright
   labels:
     app.kubernetes.io/component: database
-    app.kubernetes.io/name: torchmedia-odoo
-    app.kubernetes.io/part-of: torchmedia-odoo
+    app.kubernetes.io/name: komibright
+    app.kubernetes.io/part-of: komibright
   nodeSelector:
     node-role.kubernetes.io/control-plane: 'true'
   env:
@@ -211,17 +260,17 @@ postgres:
       valueFrom:
         secretKeyRef:
           key: POSTGRES_USER
-          name: torchmedia-db-secret
+          name: komibright-db-secret
     - name: POSTGRES_PASSWORD
       valueFrom:
         secretKeyRef:
           key: POSTGRES_PASSWORD
-          name: torchmedia-db-secret
+          name: komibright-db-secret
     - name: POSTGRES_DB
       valueFrom:
         secretKeyRef:
           key: POSTGRES_DB
-          name: torchmedia-db-secret
+          name: komibright-db-secret
     - name: PGDATA
       value: /var/lib/postgresql/data/pgdata
   ports:
@@ -233,9 +282,9 @@ postgres:
       command:
       - pg_isready
       - -U
-      - odoo
+      - komibright
       - -d
-      - torchmedia
+      - komibright
     failureThreshold: 3
     initialDelaySeconds: 30
     periodSeconds: 10
@@ -246,9 +295,9 @@ postgres:
       command:
       - pg_isready
       - -U
-      - odoo
+      - komibright
       - -d
-      - torchmedia
+      - komibright
     failureThreshold: 3
     initialDelaySeconds: 5
     periodSeconds: 5
@@ -259,20 +308,20 @@ postgres:
       cpu: '1'
       memory: 2Gi
     requests:
-      cpu: 250m
-      memory: 512Mi
+      cpu: 100m
+      memory: 256Mi
   volumeMounts:
     - mountPath: /var/lib/postgresql/data
       name: postgres-data
   volumes:
     - name: postgres-data
       persistentVolumeClaim:
-        claimName: torchmedia-db-pvc
+        claimName: komibright-db-pvc
   service:
     type: ClusterIP
     labels:
       app.kubernetes.io/component: database
-      app.kubernetes.io/part-of: torchmedia-odoo
+      app.kubernetes.io/part-of: komibright
     ports:
       - name: postgres
         port: 5432
@@ -287,13 +336,11 @@ tunnel:
   imagePullPolicy: IfNotPresent
   selectorLabels:
     app.kubernetes.io/component: cloudflared
-    app.kubernetes.io/name: torchmedia
+    app.kubernetes.io/name: komibright
   labels:
     app.kubernetes.io/component: cloudflared
-    app.kubernetes.io/name: torchmedia
-    app.kubernetes.io/part-of: torchmedia
-  podAnnotations:
-    kubectl.kubernetes.io/restartedAt: '2026-06-26T15:56:05+08:00'
+    app.kubernetes.io/name: komibright
+    app.kubernetes.io/part-of: komibright
   nodeSelector:
     node-role.kubernetes.io/control-plane: 'true'
   strategy:
@@ -311,7 +358,7 @@ tunnel:
       valueFrom:
         secretKeyRef:
           key: TUNNEL_TOKEN
-          name: torchmedia-cf-tunnel
+          name: komibright-cf-tunnel
   lifecycle:
     preStop:
       exec:
@@ -328,5 +375,43 @@ tunnel:
       memory: 64Mi
 
 backup:
-  # This tenant has no backup CronJob.
-  enabled: false
+  enabled: true
+  name: pg-backup
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  backoffLimit: 2
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  restartPolicy: OnFailure
+  labels:
+    app.kubernetes.io/component: db-backup
+    app.kubernetes.io/part-of: komibright
+  # Verbatim: the backup command is per-tenant.
+  containers:
+    - command:
+      - sh
+      - -c
+      - "set -euo pipefail\nmkdir -p /backups\n# ── R-1：等待 postgres 可連通 ────────────────────────────────\n# 新 pod 啟動時 NetworkPolicy 的 iptables 規則尚未程式化完成，\n# 此期間封包被 REJECT（pg_dump 收到 Connection refused）→ 產生 0-byte dump。\n# 上限 60 秒（勿縮小：#279/#280 實測該空窗可達 20–30 秒）；逾時以非零碼退出。\ni=0\nuntil pg_isready -h komibright-postgres-svc -U komibright -q; do\n  i=$((i+1))\n  if [ \"$i\" -ge 60 ]; then\n    echo \"R-1: postgres 於 60 秒內無法連通，放棄本次備份\" >&2\n    exit 1\n  fi\n  sleep 1\ndone\necho \"R-1: postgres 於第 ${i} 秒可連通\"\n# ─────────────────────────────────────────────────────────────\nOUT=/backups/komibright_$(date +%Y%m%d_%H%M%S).pg\nPGPASSWORD=$POSTGRES_PASSWORD pg_dump -h komibright-postgres-svc -U komibright -d komibright -Fc -f \"$OUT\"\ntest -s \"$OUT\"\nls -lh \"$OUT\"\nls -t /backups/komibright_*.pg | tail -n +8 | xargs -r rm -f || true\n"
+      env:
+      - name: POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            key: POSTGRES_PASSWORD
+            name: komibright-db-secret
+      image: postgres:16-alpine
+      imagePullPolicy: IfNotPresent
+      name: backup
+      resources:
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      volumeMounts:
+      - mountPath: /backups
+        name: backup
+  volumes:
+    - name: backup
+      persistentVolumeClaim:
+        claimName: komibright-backup-pvc

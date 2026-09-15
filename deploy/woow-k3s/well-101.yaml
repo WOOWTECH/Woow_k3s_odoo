@@ -5,35 +5,14 @@
 # The init containers below are this tenant's own provisioning script,
 # carried verbatim. Do not regenerate or 'tidy' them.
 #
-# RENAMED 2026-09-15. This tenant's objects used to be called plainly `odoo`,
-# `postgres` and `cloudflared`, with no tenant prefix - the only one of the
-# seventeen like that. They now follow the same rule as everyone else.
-#
-# Two things outside this file had to move with them: `db_host` in the
-# odoo-config ConfigMap, and the Cloudflare tunnel ingress rule for
-# well-101-odoo.woowtech.io, which lives in the Cloudflare dashboard rather
-# than in the cluster.
-#
 # SAFETY: never set `namespace:` here - placement is `-n` only.
 
 tenant: well-101
 
 odoo:
-  name: well-101-odoo
   containerName: odoo
   replicas: 1
   strategy: Recreate
-  # PINNED 2026-09-15 to the digest this tenant was ALREADY RUNNING (18.0-20260609),
-  # so applying it is a version no-op. It replaces the floating "odoo:18.0",
-  # under which the seventeen tenants had already drifted apart: eleven said
-  # `odoo:18.0` while running two builds two months apart, and Docker Hub's
-  # 18.0 had moved on to a third that nobody runs. With IfNotPresent and the
-  # digest pre-pulled onto all four nodes, a reschedule can no longer silently
-  # upgrade this tenant - which for Odoo could mean an unattended database
-  # migration.
-  #
-  # To upgrade deliberately: pick the digest, pre-pull it onto every node the
-  # pod may land on, update this line (and the init-db one), then helm upgrade.
   image: odoo@sha256:f0d5dcafc72cacea66ae0ee8d7950d436d19d084ffade089f51e14c98b823803
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
@@ -180,24 +159,6 @@ odoo:
         sizeLimit: 500Mi
       name: nginx-cache
   service:
-    name: well-101-odoo-svc
-    type: ClusterIP
-    labels:
-      app.kubernetes.io/name: odoo
-      app.kubernetes.io/part-of: well-101
-    ports:
-      - name: http
-        port: 8069
-        protocol: TCP
-        targetPort: 8069
-      - name: longpolling
-        port: 8072
-        protocol: TCP
-        targetPort: 8072
-      - name: nginx
-        port: 8080
-        protocol: TCP
-        targetPort: 8080
 
 nginx:
   enabled: true
@@ -225,7 +186,6 @@ nginx:
 
 postgres:
   enabled: true
-  name: well-101-postgres
   containerName: postgres
   replicas: 1
   strategy: Recreate
@@ -305,20 +265,9 @@ postgres:
       persistentVolumeClaim:
         claimName: postgres-data
   service:
-    name: well-101-postgres-svc
-    type: ClusterIP
-    labels:
-      app.kubernetes.io/name: postgres
-      app.kubernetes.io/part-of: well-101
-    ports:
-      - name: postgres
-        port: 5432
-        protocol: TCP
-        targetPort: 5432
 
 tunnel:
   enabled: true
-  name: well-101-cloudflared
   containerName: cloudflared
   replicas: 1
   image: cloudflare/cloudflared:latest
@@ -362,40 +311,5 @@ tunnel:
       memory: 64Mi
 
 backup:
-  enabled: true
-  name: pg-backup
-  schedule: "30 3 * * *"
-  concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  backoffLimit: 2
-  restartPolicy: OnFailure
-  labels:
-    app.kubernetes.io/component: db-backup
-    app.kubernetes.io/part-of: well-101
-  # Verbatim: the backup command is per-tenant.
-  containers:
-    - command:
-      - sh
-      - -c
-      - "set -euo pipefail\nmkdir -p /backups\n# ── R-1：等待 postgres 可連通 ────────────────────────────────\n# 新 pod 啟動時 NetworkPolicy 的 iptables 規則尚未程式化完成，\n# 此期間封包被 REJECT（pg_dump 收到 Connection refused）→ 產生 0-byte dump。\n# 上限 60 秒（勿縮小：#279/#280 實測該空窗可達 20–30 秒）；逾時以非零碼退出。\ni=0\nuntil pg_isready -h well-101-postgres-svc -U well101 -q; do\n  i=$((i+1))\n  if [ \"$i\" -ge 60 ]; then\n    echo \"R-1: postgres 於 60 秒內無法連通，放棄本次備份\" >&2\n    exit 1\n  fi\n  sleep 1\ndone\necho \"R-1: postgres 於第 ${i} 秒可連通\"\n# ─────────────────────────────────────────────────────────────\nOUT=/backups/well101_$(date +%Y%m%d_%H%M%S).pg\nPGPASSWORD=$POSTGRES_PASSWORD pg_dump -h well-101-postgres-svc -U well101 -d well101 -Fc -f \"$OUT\"\ntest -s \"$OUT\"\nls -lh \"$OUT\"\nls -t /backups/well101_*.pg | tail -n +8 | xargs -r rm -f || true\n"
-      env:
-      - name: POSTGRES_PASSWORD
-        valueFrom:
-          secretKeyRef:
-            key: POSTGRES_PASSWORD
-            name: postgres-secret
-      image: postgres:16-alpine
-      imagePullPolicy: IfNotPresent
-      name: backup
-      resources:
-        limits:
-          cpu: 500m
-          memory: 256Mi
-      volumeMounts:
-      - mountPath: /backups
-        name: backup
-  volumes:
-    - name: backup
-      persistentVolumeClaim:
-        claimName: odoo-data
+  # This tenant has no backup CronJob.
+  enabled: false

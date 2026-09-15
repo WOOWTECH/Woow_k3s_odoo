@@ -130,6 +130,11 @@ tunnel:
   readinessProbe: {}
   resources: {}
 
+# Additional Cloudflare tunnels beyond `tunnel` above. One tenant runs two
+# independent ones in the same namespace - see templates/cloudflared-extra.yaml.
+# Each entry takes the same keys as `tunnel`.
+extraTunnels: []
+
 backup:
   # Three tenants had none at all until 2026-09-15.
   enabled: true
@@ -149,6 +154,12 @@ backup:
   successfulJobsHistoryLimit: null
   failedJobsHistoryLimit: null
   backoffLimit: null
+  # Skip a run the controller missed by more than this, rather than firing late.
+  startingDeadlineSeconds: 600
+  # Kill a dump that hangs instead of letting it run into the next one.
+  activeDeadlineSeconds: 1800
+  # Reap finished Jobs after a day.
+  ttlSecondsAfterFinished: 86400
   restartPolicy: OnFailure
   labels: {}
   nodeSelector: {}
