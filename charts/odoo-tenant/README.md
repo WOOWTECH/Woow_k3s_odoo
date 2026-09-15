@@ -58,3 +58,36 @@ committed.
 The ConfigMaps holding `odoo.conf` and `nginx.conf`, the Secrets holding the
 database credentials and the tunnel token, and the PersistentVolumeClaims. They
 hold live state and predate the charts.
+
+## pgPassword
+
+Six tenants - bnidistrict, evergreen, mujimed, puhsu, wassa and well-101 - run an
+`init-db` init container whose script opens its own psycopg2 connection, so the
+database password sits in the script text rather than behind a `secretKeyRef`.
+The values file holds `__PGPASSWORD__` there; the chart substitutes the real value
+at render time. Rendering without it fails, on purpose - a placeholder must never
+reach a running pod.
+
+The password of record is the one in the cluster, so read it from there:
+
+```sh
+kubectl -n <ns> get secret <ns-prefix>-postgres-secret \
+  -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d
+```
+
+(well-101's Secret is just `postgres-secret`.) Then:
+
+```sh
+helm upgrade odoo-tenant charts/odoo-tenant -n <ns> \
+  -f deploy/woow-k3s/<ns>.yaml --set-string pgPassword="$PW"
+```
+
+Never put the value in a file under this repo. CI rejects a literal password in
+`deploy/woow-k3s/`, and `pgPassword` must stay `""` in values.yaml.
+
+These six passwords were rotated on 2026-09-15 because the earlier, unredacted
+instance files had been pushed to this public repository. A rotation touches four
+places, and all four have to move together: the database itself (`ALTER USER`),
+the `POSTGRES_PASSWORD` Secret, the `db_password` line in the `odoo.conf`
+ConfigMap - which is NOT managed by this chart, and for well-101 is the only place
+the Odoo container reads the password from - and this `pgPassword` at upgrade time.
