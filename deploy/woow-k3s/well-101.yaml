@@ -311,5 +311,43 @@ tunnel:
       memory: 64Mi
 
 backup:
-  # This tenant has no backup CronJob.
-  enabled: false
+  enabled: true
+  name: pg-backup
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  backoffLimit: 2
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  restartPolicy: OnFailure
+  labels:
+    app.kubernetes.io/component: db-backup
+    app.kubernetes.io/part-of: well-101
+  # Verbatim: the backup command is per-tenant.
+  containers:
+    - command:
+      - sh
+      - -c
+      - "set -euo pipefail\nmkdir -p /backups\n# ── R-1：等待 postgres 可連通 ────────────────────────────────\n# 新 pod 啟動時 NetworkPolicy 的 iptables 規則尚未程式化完成，\n# 此期間封包被 REJECT（pg_dump 收到 Connection refused）→ 產生 0-byte dump。\n# 上限 60 秒（勿縮小：#279/#280 實測該空窗可達 20–30 秒）；逾時以非零碼退出。\ni=0\nuntil pg_isready -h well-101-postgres-svc -U well101 -q; do\n  i=$((i+1))\n  if [ \"$i\" -ge 60 ]; then\n    echo \"R-1: postgres 於 60 秒內無法連通，放棄本次備份\" >&2\n    exit 1\n  fi\n  sleep 1\ndone\necho \"R-1: postgres 於第 ${i} 秒可連通\"\n# ─────────────────────────────────────────────────────────────\nOUT=/backups/well101_$(date +%Y%m%d_%H%M%S).pg\nPGPASSWORD=$POSTGRES_PASSWORD pg_dump -h well-101-postgres-svc -U well101 -d well101 -Fc -f \"$OUT\"\ntest -s \"$OUT\"\nls -lh \"$OUT\"\nls -t /backups/well101_*.pg | tail -n +8 | xargs -r rm -f || true\n"
+      env:
+      - name: POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            key: POSTGRES_PASSWORD
+            name: postgres-secret
+      image: postgres:16-alpine
+      imagePullPolicy: IfNotPresent
+      name: backup
+      resources:
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      volumeMounts:
+      - mountPath: /backups
+        name: backup
+  volumes:
+    - name: backup
+      persistentVolumeClaim:
+        claimName: odoo-data
