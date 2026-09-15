@@ -24,7 +24,7 @@ odoo:
   #
   # To upgrade deliberately: pick the digest, pre-pull it onto every node the
   # pod may land on, update this line (and the init-db one), then helm upgrade.
-  image: odoo@sha256:f0d5dcafc72cacea66ae0ee8d7950d436d19d084ffade089f51e14c98b823803
+  image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:
@@ -78,7 +78,7 @@ odoo:
       - sh
       - -c
       - "set -e\necho \"=== Checking database status ===\"\n\nDB_READY=$(python3 -c \"\nimport psycopg2\ntry:\n    conn = psycopg2.connect(host='bnidistrict-postgres-svc', dbname='bnidistrict', user='bnidistrict', password='__PGPASSWORD__')\n    cur = conn.cursor()\n    cur.execute(\\\"SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='ir_module_module'\\\")\n    count = cur.fetchone()[0]\n    conn.close()\n    print('yes' if count > 0 else 'no')\nexcept:\n    print('no')\n\" 2>/dev/null || echo \"no\")\n\nif [ \"$DB_READY\" = \"yes\" ]; then\n  echo \"Database already initialized. Skipping.\"\n  exit 0\nfi\n\necho \"=== Initializing Odoo database 'bnidistrict' with base module ===\"\necho \"This may take several minutes...\"\n\nodoo -d bnidistrict \\\n  -i base \\\n  --load-language=zh_TW \\\n  --stop-after-init \\\n  -c /etc/odoo/odoo.conf\n\necho \"=== Configuring Taiwan locale settings ===\"\npython3 << 'PYEOF'\nimport psycopg2\n\nconn = psycopg2.connect(host='bnidistrict-postgres-svc', dbname='bnidistrict', user='bnidistrict', password='__PGPASSWORD__')\ncur = conn.cursor()\n\n# Admin: set lang/tz\ncur.execute(\"UPDATE res_partner SET lang='zh_TW', tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users WHERE login='admin')\")\nprint(\"  - Admin: lang=zh_TW, tz=Asia/Taipei\")\n\n# Set all user partners timezone\ncur.execute(\"UPDATE res_partner SET tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users) AND (tz IS NULL OR tz='' OR tz='Europe/Brussels')\")\n\n# Company country -> Taiwan\ncur.execute(\"SELECT id FROM res_country WHERE code='TW'\")\ntw = cur.fetchone()\nif tw:\n    cur.execute(\"UPDATE res_partner SET country_id=%s WHERE id IN (SELECT partner_id FROM res_company WHERE id=1)\", (tw[0],))\n    print(f\"  - Company country: Taiwan (id={tw[0]})\")\n\n# Company currency -> TWD\ncur.execute(\"SELECT id FROM res_currency WHERE name='TWD'\")\ntwd = cur.fetchone()\nif twd:\n    cur.execute(\"UPDATE res_company SET currency_id=%s WHERE id=1\", (twd[0],))\n    cur.execute(\"UPDATE res_currency SET active=true WHERE name='TWD'\")\n    print(f\"  - Company currency: TWD (id={twd[0]})\")\n\n# Company name\ncur.execute(\"UPDATE res_company SET name='BNI District' WHERE id=1\")\ncur.execute(\"UPDATE res_partner SET name='BNI District' WHERE id IN (SELECT partner_id FROM res_company WHERE id=1)\")\nprint(\"  - Company name: BNI District\")\n\nconn.commit()\ncur.close()\nconn.close()\nprint(\"Taiwan locale configured!\")\nPYEOF\n\necho \"=== Database initialization complete (base only) ===\"\necho \"  Login: admin / admin\"\necho \"  Database: bnidistrict\"\n"
-      image: odoo@sha256:f0d5dcafc72cacea66ae0ee8d7950d436d19d084ffade089f51e14c98b823803
+      image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
       imagePullPolicy: IfNotPresent
       name: init-db
       resources: {}

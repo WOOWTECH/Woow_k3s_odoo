@@ -13,7 +13,7 @@ odoo:
   containerName: odoo
   replicas: 1
   strategy: Recreate
-  image: odoo@sha256:c1ad8ac124214c33f5d57a957ca88cb5c3d70255132794e32b7894d063ea1449
+  image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:

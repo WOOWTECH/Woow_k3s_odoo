@@ -13,7 +13,7 @@ odoo:
   containerName: odoo
   replicas: 1
   strategy: Recreate
-  image: odoo@sha256:a419f4e386bbc4826b0850907e5831c94d2a963a0f067fe53205cea365678e01
+  image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:
@@ -59,7 +59,7 @@ odoo:
       - bash
       - -c
       - "pip install --break-system-packages --quiet --ignore-installed \\\n  openai google-generativeai markdown packaging pycryptodomex\n"
-      image: odoo@sha256:a419f4e386bbc4826b0850907e5831c94d2a963a0f067fe53205cea365678e01
+      image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
       imagePullPolicy: IfNotPresent
       name: install-pip-deps
       resources:
