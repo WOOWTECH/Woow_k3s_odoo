@@ -24,7 +24,7 @@ odoo:
     app.kubernetes.io/name: torchmedia-odoo
     app.kubernetes.io/part-of: torchmedia-odoo
   podAnnotations:
-    kubectl.kubernetes.io/restartedAt: '2026-06-19T15:32:01+08:00'
+    kubectl.kubernetes.io/restartedAt: '2026-09-15T13:46:05+08:00'
   nodeSelector:
     node-role.kubernetes.io/control-plane: 'true'
   podSecurityContext:

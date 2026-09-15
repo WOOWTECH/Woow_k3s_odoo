@@ -19,7 +19,7 @@ odoo:
   selectorLabels:
     app: hsinpoli-odoo
   podAnnotations:
-    kubectl.kubernetes.io/restartedAt: '2026-07-08T14:03:24+08:00'
+    kubectl.kubernetes.io/restartedAt: '2026-09-15T13:57:40+08:00'
   nodeSelector:
     node-role.kubernetes.io/control-plane: 'true'
   podSecurityContext:

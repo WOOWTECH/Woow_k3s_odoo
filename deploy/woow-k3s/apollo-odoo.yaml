@@ -21,7 +21,7 @@ odoo:
   labels:
     app: apollo-odoo
   podAnnotations:
-    kubectl.kubernetes.io/restartedAt: '2026-07-13T19:34:00+08:00'
+    kubectl.kubernetes.io/restartedAt: '2026-09-15T13:52:58+08:00'
   nodeSelector:
     node-role.kubernetes.io/control-plane: 'true'
   podSecurityContext:

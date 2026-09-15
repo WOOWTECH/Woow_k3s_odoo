@@ -10,6 +10,8 @@
 tenant: cindytech
 
 odoo:
+  podAnnotations:
+    kubectl.kubernetes.io/restartedAt: '2026-09-15T13:55:16+08:00'
   containerName: odoo
   replicas: 1
   strategy: Recreate

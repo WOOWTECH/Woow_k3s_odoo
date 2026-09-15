@@ -21,7 +21,7 @@ odoo:
   labels:
     {}
   podAnnotations:
-    kubectl.kubernetes.io/restartedAt: '2026-09-12T04:05:52+08:00'
+    kubectl.kubernetes.io/restartedAt: '2026-09-15T13:42:43+08:00'
   nodeSelector:
     node-role.kubernetes.io/control-plane: 'true'
   podSecurityContext:
