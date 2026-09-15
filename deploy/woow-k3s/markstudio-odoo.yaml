@@ -1,0 +1,358 @@
+# Instance values for the markstudio-odoo Odoo tenant on woow-k3s.
+# Generated from the live objects: the render reproduces the running pod
+# templates exactly, so adopting them restarts nothing.
+#
+# The init containers below are this tenant's own provisioning script,
+# carried verbatim. Do not regenerate or 'tidy' them.
+#
+# SAFETY: never set `namespace:` here - placement is `-n` only.
+
+tenant: markstudio
+
+odoo:
+  containerName: odoo
+  replicas: 1
+  strategy: Recreate
+  image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
+  imagePullPolicy: IfNotPresent
+  # IMMUTABLE on the live Deployment.
+  selectorLabels:
+    app: markstudio-odoo
+  labels:
+    {}
+  podAnnotations:
+    kubectl.kubernetes.io/restartedAt: '2026-09-15T13:42:43+08:00'
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  podSecurityContext:
+    fsGroup: 101
+  # Verbatim - this tenant's provisioning script.
+  initContainers:
+    - command:
+      - sh
+      - -c
+      - chown -R 101:101 /var/lib/odoo
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      name: fix-perms
+      resources:
+        limits:
+          cpu: 50m
+          memory: 32Mi
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+      - mountPath: /var/lib/odoo
+        name: data
+    - command:
+      - sh
+      - -c
+      - until nc -z markstudio-postgres-svc 5432; do sleep 2; done
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      name: wait-pg
+      resources:
+        limits:
+          cpu: 50m
+          memory: 32Mi
+  command:
+    - bash
+    - -c
+    - cp /etc/odoo/odoo.conf /tmp/odoo.conf && sed -i "s|db_password = .*|db_password = $PASSWORD|" /tmp/odoo.conf && sed -i "s|admin_passwd = .*|admin_passwd = $ADMIN_PASSWORD|" /tmp/odoo.conf && exec odoo --config=/tmp/odoo.conf
+  env:
+    - name: HOST
+      value: markstudio-postgres-svc
+    - name: PORT
+      value: '5432'
+    - name: USER
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_USER
+          name: markstudio-postgres-secret
+    - name: PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_PASSWORD
+          name: markstudio-postgres-secret
+    - name: PIP_BREAK_SYSTEM_PACKAGES
+      value: '1'
+    - name: ADMIN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: ADMIN_PASSWORD
+          name: markstudio-postgres-secret
+  ports:
+    - containerPort: 8069
+      name: http
+      protocol: TCP
+    - containerPort: 8072
+      name: lp
+      protocol: TCP
+  livenessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    initialDelaySeconds: 120
+    periodSeconds: 30
+    successThreshold: 1
+    timeoutSeconds: 1
+  readinessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 1
+  startupProbe:
+    failureThreshold: 60
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    successThreshold: 1
+    timeoutSeconds: 1
+  resources:
+    limits:
+      cpu: '2'
+      memory: 3Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  volumeMounts:
+    - mountPath: /var/lib/odoo
+      name: data
+    - mountPath: /mnt/extra-addons
+      name: addons
+    - mountPath: /etc/odoo/odoo.conf
+      name: config
+      readOnly: true
+      subPath: odoo.conf
+  # Verbatim: order is part of the pod template.
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: markstudio-odoo-data
+    - name: addons
+      persistentVolumeClaim:
+        claimName: markstudio-odoo-addons
+    - configMap:
+        defaultMode: 420
+        name: markstudio-odoo-config
+      name: config
+    - configMap:
+        defaultMode: 420
+        name: markstudio-nginx-config
+      name: nginx-conf
+    - name: cache
+      persistentVolumeClaim:
+        claimName: markstudio-nginx-cache-pvc
+  service:
+    type: ClusterIP
+    labels:
+      {}
+    ports:
+      - name: http
+        port: 8069
+        protocol: TCP
+        targetPort: 8080
+      - name: lp
+        port: 8072
+        protocol: TCP
+        targetPort: 8072
+      - name: nginx
+        port: 8080
+        protocol: TCP
+        targetPort: 8080
+
+nginx:
+  enabled: true
+  containerName: nginx
+  image: nginx:1.27-alpine
+  imagePullPolicy: IfNotPresent
+  ports:
+    - containerPort: 8080
+      protocol: TCP
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  volumeMounts:
+    - mountPath: /etc/nginx/nginx.conf
+      name: nginx-conf
+      readOnly: true
+      subPath: nginx.conf
+    - mountPath: /var/cache/nginx
+      name: cache
+
+postgres:
+  enabled: true
+  containerName: postgres
+  replicas: 1
+  strategy: Recreate
+  image: postgres:16-alpine
+  imagePullPolicy: IfNotPresent
+  selectorLabels:
+    app: markstudio-postgres
+  labels:
+    {}
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  env:
+    - name: POSTGRES_USER
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_USER
+          name: markstudio-postgres-secret
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_PASSWORD
+          name: markstudio-postgres-secret
+    - name: POSTGRES_DB
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_DB
+          name: markstudio-postgres-secret
+    - name: PGDATA
+      value: /var/lib/postgresql/data/pgdata
+  ports:
+    - containerPort: 5432
+      protocol: TCP
+  livenessProbe:
+    exec:
+      command:
+      - pg_isready
+      - -U
+      - markstudio
+      - -d
+      - markstudio
+    failureThreshold: 3
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  readinessProbe:
+    exec:
+      command:
+      - pg_isready
+      - -U
+      - markstudio
+    failureThreshold: 3
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    successThreshold: 1
+    timeoutSeconds: 1
+  resources:
+    limits:
+      cpu: '1'
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  volumeMounts:
+    - mountPath: /var/lib/postgresql/data
+      name: data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: markstudio-db-pvc
+  service:
+    type: ClusterIP
+    labels:
+      {}
+    ports:
+      - port: 5432
+        protocol: TCP
+        targetPort: 5432
+
+tunnel:
+  enabled: true
+  containerName: cloudflared
+  replicas: 1
+  image: cloudflare/cloudflared:latest
+  imagePullPolicy: Always
+  selectorLabels:
+    app: markstudio-cloudflared
+  labels:
+    {}
+  podAnnotations:
+    kubectl.kubernetes.io/restartedAt: '2026-08-25T22:48:33+08:00'
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  args:
+    - tunnel
+    - --no-autoupdate
+    - --metrics
+    - 0.0.0.0:2000
+    - run
+    - --token
+    - $(TUNNEL_TOKEN)
+  env:
+    - name: TUNNEL_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: CF_TUNNEL_TOKEN
+          name: markstudio-secrets
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+backup:
+  enabled: true
+  name: pg-backup
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  backoffLimit: 2
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  restartPolicy: OnFailure
+  labels:
+    app.kubernetes.io/component: db-backup
+    app.kubernetes.io/part-of: markstudio
+  # Verbatim: the backup command is per-tenant.
+  containers:
+    - command:
+      - sh
+      - -c
+      - "set -euo pipefail\nBACKUP_DIR=/backups\nmkdir -p $BACKUP_DIR\n# ── R-1：等待 postgres 可連通 ────────────────────────────────\n# 新 pod 啟動時 NetworkPolicy 的 iptables 規則尚未程式化完成，\n# 此期間封包被 REJECT（pg_dump 收到 Connection refused）→ 產生 0-byte dump。\n# 上限 60 秒（勿縮小：#279/#280 實測該空窗可達 20–30 秒）；逾時以非零碼退出。\ni=0\nuntil pg_isready -h markstudio-postgres-svc -U markstudio -q; do\n  i=$((i+1))\n  if [ \"$i\" -ge 60 ]; then\n    echo \"R-1: postgres 於 60 秒內無法連通，放棄本次備份\" >&2\n    exit 1\n  fi\n  sleep 1\ndone\necho \"R-1: postgres 於第 ${i} 秒可連通\"\n# ─────────────────────────────────────────────────────────────\nTIMESTAMP=$(date +%Y%m%d_%H%M%S)\nOUT=$BACKUP_DIR/markstudio_${TIMESTAMP}.pg\nPGPASSWORD=$POSTGRES_PASSWORD pg_dump -h markstudio-postgres-svc -U markstudio -d markstudio -Fc -f \"$OUT\"\ntest -s \"$OUT\"\nls -lh \"$OUT\"\necho \"Backup: markstudio_${TIMESTAMP}.pg\"\nls -t $BACKUP_DIR/markstudio_*.pg | tail -n +8 | xargs -r rm -f || true\n"
+      env:
+      - name: POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            key: POSTGRES_PASSWORD
+            name: markstudio-postgres-secret
+      image: postgres:16-alpine
+      imagePullPolicy: IfNotPresent
+      name: backup
+      resources:
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      volumeMounts:
+      - mountPath: /backups
+        name: backup-storage
+  volumes:
+    - name: backup-storage
+      persistentVolumeClaim:
+        claimName: markstudio-backup-pvc

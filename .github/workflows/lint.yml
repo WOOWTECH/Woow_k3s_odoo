@@ -24,19 +24,19 @@ jobs:
 
       - name: helm lint
         run: |
-          helm lint .
-          helm lint . --set "$SECRETS"
+          helm lint charts/odoo
+          helm lint charts/odoo --set "$SECRETS"
 
       - name: helm template (every values combination)
         run: |
           mkdir -p /tmp/r
-          helm template odoo . -n odoo                                       > /tmp/r/default.yaml
-          helm template odoo .                                               > /tmp/r/default-ns.yaml
-          helm template odoo . -n odoo --set "$SECRETS"                      > /tmp/r/secrets.yaml
-          helm template odoo . -n odoo --set "$SECRETS" --set keepOnUninstall=false > /tmp/r/no-keep.yaml
-          helm template odoo . -n odoo --set tests.enabled=false             > /tmp/r/no-tests.yaml
+          helm template odoo charts/odoo -n odoo                                       > /tmp/r/default.yaml
+          helm template odoo charts/odoo                                               > /tmp/r/default-ns.yaml
+          helm template odoo charts/odoo -n odoo --set "$SECRETS"                      > /tmp/r/secrets.yaml
+          helm template odoo charts/odoo -n odoo --set "$SECRETS" --set keepOnUninstall=false > /tmp/r/no-keep.yaml
+          helm template odoo charts/odoo -n odoo --set tests.enabled=false             > /tmp/r/no-tests.yaml
           # The shape of a test install: own namespace, disposable storage, no NodePort.
-          helm template odoo . -n ht-odoo \
+          helm template odoo charts/odoo -n ht-odoo \
             --set namespace.name=ht-odoo,namespace.create=false \
             --set odoo.persistence.data.storageClassName=longhorn-delete \
             --set odoo.persistence.addons.storageClassName=longhorn-delete \
@@ -48,17 +48,18 @@ jobs:
             # object is never rendered by the combinations above (a release cannot own
             # the namespace it lives in). Render it explicitly, or the "every template
             # renders" guard below fails on templates/namespace.yaml.
-            helm template odoo . -n release-ns --set namespace.create=true --set namespace.name=odoo-elsewhere  > /tmp/r/other-ns.yaml
+            helm template odoo charts/odoo -n release-ns --set namespace.create=true --set namespace.name=odoo-elsewhere  > /tmp/r/other-ns.yaml
           wc -l /tmp/r/*.yaml
 
       - name: Every template is tracked and renders
         run: |
           # An unanchored .gitignore pattern once kept templates/secrets.yaml out of git.
-          for f in $(find templates -type f); do
+          for f in $(find charts/odoo/templates -type f); do
             if git check-ignore --no-index -q "$f"; then echo "::error::$f is matched by .gitignore"; exit 1; fi
           done
-          for f in $(find templates -type f -name '*.yaml'); do
-            grep -q "^# Source: odoo/$f\$" /tmp/r/*.yaml || { echo "::error::$f never renders"; exit 1; }
+          for f in $(find charts/odoo/templates -type f -name '*.yaml'); do
+            # Helm's "# Source:" line is <chart name>/templates/..., not the repo path.
+            grep -q "^# Source: odoo/${f#charts/odoo/}\$" /tmp/r/*.yaml || { echo "::error::$f never renders"; exit 1; }
           done
           echo "every template is tracked and renders"
 
@@ -71,13 +72,13 @@ jobs:
 
       - name: Required secrets are enforced
         run: |
-          if helm template odoo . --set secrets.create=true > /dev/null 2>&1; then
+          if helm template odoo charts/odoo --set secrets.create=true > /dev/null 2>&1; then
             echo "secrets.create=true rendered without any secret values"; exit 1
           fi
           # Each key on its own: drop it from the dummy set and expect its own required() message.
           for k in postgresPassword adminPasswd; do
             set_without=$(echo "$SECRETS" | tr ',' '\n' | grep -v "^secrets.$k=" | paste -sd, -)
-            if out=$(helm template odoo . -n odoo --set "$set_without" 2>&1); then
+            if out=$(helm template odoo charts/odoo -n odoo --set "$set_without" 2>&1); then
               echo "::error::secrets.$k is not enforced"; exit 1
             fi
             echo "$out" | grep -q "secrets.$k is required" || { echo "::error::wrong error for $k: $out"; exit 1; }
@@ -131,7 +132,7 @@ jobs:
           python3 - <<'EOF'
           import glob, sys, yaml
           bad = []
-          s = yaml.safe_load(open("values.yaml"))["secrets"]
+          s = yaml.safe_load(open("charts/odoo/values.yaml"))["secrets"]
           for k, v in s.items():
               if k not in ("create", "postgresUser", "postgresDb") and v:
                   bad.append(f"values.yaml secrets.{k} must be empty")
@@ -139,7 +140,7 @@ jobs:
               for d in yaml.safe_load_all(open(f)):
                   if d and d["kind"] == "Secret":
                       bad.append(f"{f} must not contain Secrets (secrets.create=false)")
-          for d in yaml.safe_load_all(open("examples/secrets.example.yaml")):
+          for d in yaml.safe_load_all(open("charts/odoo/examples/secrets.example.yaml")):
               for k, v in ((d or {}).get("stringData") or {}).items():
                   if k not in ("POSTGRES_USER", "POSTGRES_DB") and "REPLACE_ME" not in str(v):
                       bad.append(f"examples: {d['metadata']['name']}.{k} is not a placeholder")
@@ -162,7 +163,7 @@ jobs:
           EOF
 
       - name: helm package
-        run: helm package . -d /tmp/pkg
+        run: helm package charts/odoo -d /tmp/pkg
 
       - name: "-n controls object placement (namespace footgun)"
         run: |
@@ -170,7 +171,7 @@ jobs:
           # rehearsal once wrote Helm ownership annotations onto a live
           # production Deployment. Every object must land in the namespace
           # given by -n when namespace.name is left at its empty default.
-          got=$(helm template t . -n SENTINEL --skip-tests  | grep "^  namespace:" | sort -u)
+          got=$(helm template t charts/odoo -n SENTINEL --skip-tests  | grep "^  namespace:" | sort -u)
           if [ "$got" != "  namespace: SENTINEL" ]; then
             echo "::error::. ignores -n: $got"; exit 1
           fi
@@ -188,3 +189,122 @@ jobs:
                   bad.append(f"{f}: namespace.name defaults to {n['name']!r}; it must be \"\" so -n wins")
           sys.exit("\n".join(bad)) if bad else print("namespace.name defaults are empty")
           EOF
+
+  # ── charts/odoo-tenant ────────────────────────────────────────────────────
+  # This chart adopts tenants that are already running, so its instance files
+  # under deploy/woow-k3s/ are transcriptions of live objects. That makes them
+  # the one place in this repo where a real credential can arrive by accident:
+  # whatever the live pod template contained, the transcription contains too.
+  tenant:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.5
+
+      - name: helm lint
+        run: helm lint charts/odoo-tenant --set-string pgPassword=dummy
+
+      - name: No credential is committed
+        run: |
+          python3 - <<'EOF'
+          import glob, re, sys, yaml
+          # Six tenants' init-db script opens its own psycopg2 connection, so the
+          # password appears in the script text rather than behind a secretKeyRef.
+          # __PGPASSWORD__ stands in for it and is substituted at render time.
+          conn = re.compile(r"password\s*=\s*'([^']*)'")
+          pgpw = re.compile(r"PGPASSWORD=(?!\$)(\S+)")
+          # A cloudflared token or a long opaque path is the other shape of leak.
+          blob = re.compile(r"[A-Za-z0-9+/=]{120,}")
+          bad = []
+          for f in sorted(glob.glob("deploy/woow-k3s/*.yaml")):
+              raw = open(f).read()
+              for m in conn.finditer(raw):
+                  if m.group(1) != "__PGPASSWORD__":
+                      bad.append(f"{f}: init script embeds a literal database password "
+                                 f"({m.group(0)!r}); put __PGPASSWORD__ there and pass "
+                                 f"--set-string pgPassword=... at install time")
+              for m in pgpw.finditer(raw):
+                  bad.append(f"{f}: PGPASSWORD is set to a literal ({m.group(0)!r})")
+              for m in blob.finditer(raw):
+                  bad.append(f"{f}: {len(m.group(0))}-char opaque string looks like a token")
+              # A top-level `namespace:` in an instance file silently beats `-n`,
+              # which is how a rehearsal once wrote into the wrong namespace.
+              v = yaml.safe_load(raw) or {}
+              if "namespace" in v:
+                  bad.append(f"{f}: must not set a top-level `namespace:` - it beats -n")
+          # And the chart's own default must stay empty.
+          if (yaml.safe_load(open("charts/odoo-tenant/values.yaml")) or {}).get("pgPassword"):
+              bad.append("charts/odoo-tenant/values.yaml: pgPassword must default to \"\"")
+          sys.exit("\n".join(bad)) if bad else print("no credential is committed")
+          EOF
+
+      - name: Every instance renders, with its image pinned by digest
+        run: |
+          mkdir -p /tmp/t
+          fail=0
+          for f in deploy/woow-k3s/*.yaml; do
+            ns=$(basename "$f" .yaml)
+            if ! helm template odoo-tenant charts/odoo-tenant -n "$ns" -f "$f" \
+                 --set-string pgPassword=dummy > "/tmp/t/$ns.yaml" 2>/tmp/t/$ns.err; then
+              echo "::error file=$f::does not render"; sed 's/^/    /' /tmp/t/$ns.err; fail=1; continue
+            fi
+            # An unrendered object produces no diff, so `kubectl diff` cannot catch
+            # a values block that went empty. Count the objects instead: a tenant is
+            # at minimum its Odoo Deployment plus a Service, and its postgres pair.
+            n=$(grep -c '^kind: ' "/tmp/t/$ns.yaml" || true)
+            if [ "$n" -lt 4 ]; then
+              echo "::error file=$f::only $n objects rendered; a tenant needs at least 4"; fail=1
+            fi
+            # Every tenant said `odoo:18.0` and each ran whichever build its node
+            # happened to have cached; that is what the digest pin removed. Keep it
+            # pinned. (alpine/git and cloudflared are still on :latest - flagged,
+            # not failed, because pinning them costs a restart per tenant.)
+            if grep -qE '^\s+image: odoo:' "/tmp/t/$ns.yaml"; then
+              echo "::error file=$f::the odoo image is on a tag; pin it by digest"
+              grep -nE '^\s+image: odoo:' "/tmp/t/$ns.yaml" | sed 's/^/    /'
+              fail=1
+            fi
+            grep -nE '^\s+image: .*:latest\s*$' "/tmp/t/$ns.yaml" \
+              | sed "s|^|::warning file=$f::unpinned image - |" || true
+            if grep -q '__PGPASSWORD__' "/tmp/t/$ns.yaml"; then
+              echo "::error file=$f::__PGPASSWORD__ survived rendering"; fail=1
+            fi
+            echo "  $ns: $n objects"
+          done
+          [ "$fail" -eq 0 ] || exit 1
+
+      - name: pgPassword is enforced where the script needs it
+        run: |
+          fail=0
+          for f in deploy/woow-k3s/*.yaml; do
+            grep -q '__PGPASSWORD__' "$f" || continue
+            ns=$(basename "$f" .yaml)
+            if out=$(helm template odoo-tenant charts/odoo-tenant -n "$ns" -f "$f" 2>&1); then
+              echo "::error file=$f::rendered without pgPassword"; fail=1; continue
+            fi
+            echo "$out" | grep -q "pgPassword is required" \
+              || { echo "::error file=$f::wrong failure: $out"; fail=1; }
+            echo "  $ns: guarded"
+          done
+          [ "$fail" -eq 0 ] || exit 1
+
+      - name: kubeconform (schema validation)
+        run: |
+          curl -sSLo /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz
+          echo "${KUBECONFORM_SHA256}  /tmp/kc.tgz" | sha256sum -c -
+          tar -xzf /tmp/kc.tgz -C /usr/local/bin kubeconform
+          kubeconform -strict -summary /tmp/t/*.yaml
+
+      - name: "-n controls object placement"
+        run: |
+          got=$(helm template t charts/odoo-tenant -n SENTINEL \
+                -f deploy/woow-k3s/komibright.yaml --set-string pgPassword=dummy \
+                | grep "^  namespace:" | sort -u)
+          if [ "$got" != "  namespace: SENTINEL" ]; then
+            echo "::error::charts/odoo-tenant ignores -n: $got"; exit 1
+          fi
+          echo "-n controls placement"
