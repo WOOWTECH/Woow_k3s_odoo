@@ -71,6 +71,16 @@ odoo:
     - -c
     - cp /etc/odoo/odoo.conf /tmp/odoo.conf && sed -i "s|db_password = .*|db_password = $PASSWORD|" /tmp/odoo.conf && sed -i "s|admin_passwd = .*|admin_passwd = $ADMIN_PASSWORD|" /tmp/odoo.conf && exec odoo --config=/tmp/odoo.conf
   env:
+    # python-barcode is not in the upstream odoo:18.0 image, but
+    # barcode_scanner_base/_label declare it as an external dependency.
+    # Without it, 1D label printing raises UserError and ANY install or
+    # upgrade of those modules aborts (base is the dependency root of the
+    # whole barcode suite). The package is installed on the addons PVC at
+    # /mnt/extra-addons/.pylibs (pip --target); this makes it importable.
+    # Keep this FIRST - it matches the live env order, so the render stays
+    # identical to the running pod template and adopting restarts nothing.
+    - name: PYTHONPATH
+      value: /mnt/extra-addons/.pylibs
     - name: HOST
       value: inzense-postgres-svc
     - name: PORT
