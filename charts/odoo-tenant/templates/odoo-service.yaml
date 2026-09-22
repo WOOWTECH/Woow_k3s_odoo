@@ -1,0 +1,18 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "odoo-tenant.odooService" . }}
+  namespace: {{ include "odoo-tenant.ns" . }}
+  {{- with .Values.odoo.service.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.odoo.service.type }}
+  selector:
+    {{- include "odoo-tenant.odooSelector" . | nindent 4 }}
+  {{- with .Values.odoo.service.ports }}
+  ports:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}

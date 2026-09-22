@@ -1,0 +1,391 @@
+# Instance values for the mujimed-odoo Odoo tenant on woow-k3s.
+# Generated from the live objects: the render reproduces the running pod
+# templates exactly, so adopting them restarts nothing.
+#
+# The init containers below are this tenant's own provisioning script,
+# carried verbatim. Do not regenerate or 'tidy' them.
+#
+# SAFETY: never set `namespace:` here - placement is `-n` only.
+
+tenant: mujimed
+
+odoo:
+  containerName: odoo
+  replicas: 1
+  strategy: Recreate
+  image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
+  imagePullPolicy: IfNotPresent
+  # IMMUTABLE on the live Deployment.
+  selectorLabels:
+    app.kubernetes.io/name: odoo
+    app.kubernetes.io/part-of: mujimed
+  labels:
+    app.kubernetes.io/name: odoo
+    app.kubernetes.io/part-of: mujimed
+    app.kubernetes.io/version: '18.0'
+  podExtraLabels:
+    app.kubernetes.io/version: '18.0'
+  podAnnotations:
+    kubectl.kubernetes.io/restartedAt: '2026-09-12T04:06:54+08:00'
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  podSecurityContext:
+    fsGroup: 101
+  # Verbatim - this tenant's provisioning script.
+  initContainers:
+    - command:
+      - sh
+      - -c
+      - chown -R 101:101 /var/lib/odoo
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      name: fix-permissions
+      resources:
+        limits:
+          cpu: 50m
+          memory: 32Mi
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+      - mountPath: /var/lib/odoo
+        name: odoo-data
+    - command:
+      - sh
+      - -c
+      - "echo \"Waiting for PostgreSQL...\"\nuntil nc -z mujimed-postgres-svc 5432; do\n  echo \"  not ready - sleeping\"\n  sleep 2\ndone\necho \"PostgreSQL ready!\"\n"
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      name: wait-for-postgres
+      resources:
+        limits:
+          cpu: 50m
+          memory: 32Mi
+        requests:
+          cpu: 10m
+          memory: 16Mi
+    - command:
+      - sh
+      - -c
+      - "set -e\ncd /mnt/extra-addons\n\nclone_repo() {\n  REPO_NAME=\"$1\"\n  TARGET=\"${2:-$REPO_NAME}\"\n  if [ -d \"$TARGET\" ]; then\n    echo \"  [ok] $TARGET already exists, skipping.\"\n    return 0\n  fi\n  echo \"  Cloning $REPO_NAME -> $TARGET ...\"\n  git clone --depth 1 \"https://github.com/WOOWTECH/$REPO_NAME.git\" \"$TARGET\" 2>/dev/null || \\\n    echo \"  [WARN] Failed to clone $REPO_NAME\"\n}\n\necho \"=== Cloning WOOWTECH custom modules ===\"\n\n# LINE modules\nclone_repo \"woow_line_base\" \"woow_line_base\"\nclone_repo \"Woow_odoo_line_liff\" \"_repo_line_bridge\"\nclone_repo \"woow_odoo_livechat_line\" \"woow_odoo_livechat_line\"\n\n# Website auth\nclone_repo \"Woow_odoo_website_auth\" \"_repo_website_auth\"\n\n# Reservation\nclone_repo \"Odoo_reservation_module\" \"_repo_reservation\"\n\n# Loyalty / Member Center\nclone_repo \"Woow_odoo_loyalty_card_enhance\" \"_repo_loyalty\"\n\n# Clinic package\nclone_repo \"Woow_odoo_clinic_package\" \"_repo_clinic\"\n\n# Create symlinks for modules inside subdirectories\necho \"=== Creating symlinks for sub-modules ===\"\nfor dir in _repo_*; do\n  [ -d \"$dir\" ] || continue\n  for subdir in \"${dir}\"/*/; do\n    [ -d \"$subdir\" ] || continue\n    if [ -f \"${subdir}__manifest__.py\" ]; then\n      module_name=$(basename \"$subdir\")\n      if [ ! -e \"$module_name\" ]; then\n        echo \"  Linking: $module_name -> $subdir\"\n        ln -sf \"$(pwd)/${subdir%/}\" \"$module_name\"\n      fi\n    fi\n    # Check nested addons/ directory (loyalty repo)\n    if [ \"$(basename \"$subdir\")\" = \"addons\" ]; then\n      for nested in \"${subdir}\"*/; do\n        [ -d \"$nested\" ] || continue\n        if [ -f \"${nested}__manifest__.py\" ]; then\n          module_name=$(basename \"$nested\")\n          if [ ! -e \"$module_name\" ]; then\n            echo \"  Linking: $module_name -> $nested\"\n            ln -sf \"$(pwd)/${nested%/}\" \"$module_name\"\n          fi\n        fi\n      done\n    fi\n  done\ndone\n\n# Handle root-level manifest repos (directory IS the module)\n# woow_odoo_line_liff: the repo _repo_line_bridge itself is the module\n# (renamed from woow_line_bridge to woow_odoo_line_liff, DB migrated)\nif [ -f \"_repo_line_bridge/__manifest__.py\" ] && [ ! -e \"woow_odoo_line_liff\" ]; then\n  echo \"  Linking: woow_odoo_line_liff -> _repo_line_bridge\"\n  ln -sf \"$(pwd)/_repo_line_bridge\" \"woow_odoo_line_liff\"\nfi\n# Remove legacy symlink if it exists\n[ -e \"woow_line_bridge\" ] && rm -f \"woow_line_bridge\" && echo \"  Removed legacy symlink: woow_line_bridge\"\n\n\n\n\n\n# Patch: portal cards always visible (even with 0 count)\n# woow_member_center portal_my_home_member_center\nMC_TPL=\"/mnt/extra-addons/woow_member_center/views/portal_templates.xml\"\nif [ -f \"$MC_TPL\" ] && ! grep -q 'config_card' \"$MC_TPL\"; then\n  sed -i '/t-set=\"title\">Member Center/i\\                <t t-set=\"config_card\" t-value=\"True\"/>' \"$MC_TPL\"\n  echo \"  Patched: portal_my_home_member_center config_card=True\"\nfi\n\n\necho \"=== Custom modules ready ===\"\nls -la /mnt/extra-addons/\n"
+      image: alpine/git:latest
+      imagePullPolicy: Always
+      name: clone-modules
+      resources: {}
+      volumeMounts:
+      - mountPath: /mnt/extra-addons
+        name: odoo-addons
+    - command:
+      - sh
+      - -c
+      - "set -e\necho \"=== Checking database status ===\"\n\nDB_READY=$(python3 -c \"\nimport psycopg2\ntry:\n    conn = psycopg2.connect(host='mujimed-postgres-svc', dbname='mujimed', user='mujimed', password='__PGPASSWORD__')\n    cur = conn.cursor()\n    cur.execute(\\\"SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='ir_module_module'\\\")\n    count = cur.fetchone()[0]\n    conn.close()\n    print('yes' if count > 0 else 'no')\nexcept:\n    print('no')\n\" 2>/dev/null || echo \"no\")\n\nif [ \"$DB_READY\" = \"yes\" ]; then\n  echo \"Database already initialized. Skipping.\"\n  exit 0\nfi\n\n# Install pip dependencies needed by custom modules\necho \"=== Installing pip dependencies ===\"\npip3 install --break-system-packages requests 2>/dev/null || true\n\necho \"=== Initializing Odoo database 'mujimed' ===\"\necho \"Installing core + custom modules. This may take 10-15 minutes...\"\n\n# Core modules needed by custom addons\nMODULES=\"base,web,mail,contacts,portal\"\nMODULES=\"$MODULES,website,calendar,resource,payment,product,sale,stock\"\nMODULES=\"$MODULES,loyalty,sale_loyalty,website_sale_loyalty,website_sale_stock\"\nMODULES=\"$MODULES,im_livechat,point_of_sale\"\n\n# Custom modules - LINE\nMODULES=\"$MODULES,woow_line_base,woow_odoo_line_liff,woow_odoo_livechat_line\"\n\n# Custom modules - Website auth\nMODULES=\"$MODULES,woow_website_auth\"\n\n# Custom modules - Reservation\nMODULES=\"$MODULES,reservation_module\"\n\n# Custom modules - Loyalty / Member Center\nMODULES=\"$MODULES,woow_loyalty_consign,woow_loyalty_consign_pos,woow_member_center\"\nMODULES=\"$MODULES,woow_mc_consign,woow_mc_coupon,woow_mc_ewallet\"\nMODULES=\"$MODULES,woow_mc_gift_card,woow_mc_loyalty\"\nMODULES=\"$MODULES,woow_consign_booking\"\n\n# Custom modules - Clinic\nMODULES=\"$MODULES,woow_medical_patient,woow_medical_physician,woow_medical_record\"\n\necho \"  Modules: $MODULES\"\n\nodoo -d mujimed \\\n  -i $MODULES \\\n  --load-language=zh_TW \\\n  --without-demo=all \\\n  --stop-after-init \\\n  -c /etc/odoo/odoo.conf\n\necho \"=== Configuring Taiwan locale settings ===\"\npython3 << 'PYEOF'\nimport psycopg2\n\nconn = psycopg2.connect(host='mujimed-postgres-svc', dbname='mujimed', user='mujimed', password='__PGPASSWORD__')\ncur = conn.cursor()\n\n# Admin: set lang/tz via partner (Odoo 18 pattern)\ncur.execute(\"UPDATE res_partner SET lang='zh_TW', tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users WHERE login='admin')\")\nprint(\"  - Admin: lang=zh_TW, tz=Asia/Taipei\")\n\n# Set all user partners timezone\ncur.execute(\"UPDATE res_partner SET tz='Asia/Taipei' WHERE id IN (SELECT partner_id FROM res_users) AND (tz IS NULL OR tz='' OR tz='Europe/Brussels')\")\n\n# Company country -> Taiwan\ncur.execute(\"SELECT id FROM res_country WHERE code='TW'\")\ntw = cur.fetchone()\nif tw:\n    cur.execute(\"UPDATE res_partner SET country_id=%s WHERE id IN (SELECT partner_id FROM res_company WHERE id=1)\", (tw[0],))\n    print(f\"  - Company country: Taiwan (id={tw[0]})\")\n\n# Company currency -> TWD\ncur.execute(\"SELECT id FROM res_currency WHERE name='TWD'\")\ntwd = cur.fetchone()\nif twd:\n    cur.execute(\"UPDATE res_company SET currency_id=%s WHERE id=1\", (twd[0],))\n    cur.execute(\"UPDATE res_currency SET active=true WHERE name='TWD'\")\n    print(f\"  - Company currency: TWD (id={twd[0]})\")\n\n# Company name\ncur.execute(\"UPDATE res_company SET name='沐淨醫美' WHERE id=1\")\ncur.execute(\"UPDATE res_partner SET name='沐淨醫美' WHERE id IN (SELECT partner_id FROM res_company WHERE id=1)\")\nprint(\"  - Company name: 沐淨醫美\")\n\n# Website name\ncur.execute(\"UPDATE website SET name='沐淨醫美'\")\nprint(\"  - Website name: 沐淨醫美\")\n\n# Freeze web.base.url to HTTPS\ncur.execute(\"INSERT INTO ir_config_parameter (key, value, create_uid, write_uid, create_date, write_date) VALUES ('web.base.url', 'https://mujimed-odoo.woowtech.io', 1, 1, NOW(), NOW()) ON CONFLICT (key) DO UPDATE SET value='https://mujimed-odoo.woowtech.io'\")\ncur.execute(\"INSERT INTO ir_config_parameter (key, value, create_uid, write_uid, create_date, write_date) VALUES ('web.base.url.freeze', 'True', 1, 1, NOW(), NOW()) ON CONFLICT (key) DO UPDATE SET value='True'\")\nprint(\"  - web.base.url: https (frozen)\")\n\nconn.commit()\ncur.close()\nconn.close()\nprint(\"Taiwan locale configured!\")\nPYEOF\n\necho \"=== Database initialization complete ===\"\necho \"  Login: admin / admin\"\necho \"  Database: mujimed\"\n"
+      image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
+      imagePullPolicy: IfNotPresent
+      name: init-db
+      resources: {}
+      volumeMounts:
+      - mountPath: /etc/odoo/odoo.conf
+        name: odoo-config
+        readOnly: true
+        subPath: odoo.conf
+      - mountPath: /var/lib/odoo
+        name: odoo-data
+      - mountPath: /mnt/extra-addons
+        name: odoo-addons
+  env:
+    - name: HOST
+      value: mujimed-postgres-svc
+    - name: PORT
+      value: '5432'
+    - name: USER
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_USER
+          name: mujimed-postgres-secret
+    - name: PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_PASSWORD
+          name: mujimed-postgres-secret
+  ports:
+    - containerPort: 8069
+      name: odoo-http
+      protocol: TCP
+    - containerPort: 8072
+      name: odoo-lp
+      protocol: TCP
+  livenessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    initialDelaySeconds: 120
+    periodSeconds: 30
+    successThreshold: 1
+    timeoutSeconds: 10
+  readinessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  startupProbe:
+    failureThreshold: 60
+    httpGet:
+      path: /web/health
+      port: 8069
+      scheme: HTTP
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    successThreshold: 1
+    timeoutSeconds: 5
+  resources:
+    limits:
+      cpu: '2'
+      memory: 3Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  volumeMounts:
+    - mountPath: /var/lib/odoo
+      name: odoo-data
+    - mountPath: /mnt/extra-addons
+      name: odoo-addons
+    - mountPath: /etc/odoo/odoo.conf
+      name: odoo-config
+      readOnly: true
+      subPath: odoo.conf
+  # Verbatim: order is part of the pod template.
+  volumes:
+    - name: odoo-data
+      persistentVolumeClaim:
+        claimName: mujimed-odoo-data
+    - name: odoo-addons
+      persistentVolumeClaim:
+        claimName: mujimed-odoo-addons
+    - configMap:
+        defaultMode: 420
+        name: mujimed-odoo-config
+      name: odoo-config
+    - configMap:
+        defaultMode: 420
+        name: mujimed-nginx-config
+      name: nginx-config
+    - name: nginx-cache
+      persistentVolumeClaim:
+        claimName: mujimed-nginx-cache-pvc
+  service:
+    type: ClusterIP
+    labels:
+      app.kubernetes.io/name: odoo
+      app.kubernetes.io/part-of: mujimed
+    ports:
+      - name: http
+        port: 8069
+        protocol: TCP
+        targetPort: 8069
+      - name: longpolling
+        port: 8072
+        protocol: TCP
+        targetPort: 8072
+      - name: nginx
+        port: 8080
+        protocol: TCP
+        targetPort: 8080
+
+nginx:
+  enabled: true
+  containerName: nginx
+  image: nginx:1.27-alpine
+  imagePullPolicy: IfNotPresent
+  ports:
+    - containerPort: 8080
+      name: nginx-http
+      protocol: TCP
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  volumeMounts:
+    - mountPath: /etc/nginx/nginx.conf
+      name: nginx-config
+      readOnly: true
+      subPath: nginx.conf
+    - mountPath: /var/cache/nginx
+      name: nginx-cache
+
+postgres:
+  enabled: true
+  containerName: postgres
+  replicas: 1
+  strategy: Recreate
+  image: postgres:16-alpine
+  imagePullPolicy: IfNotPresent
+  selectorLabels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: mujimed
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: mujimed
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  env:
+    - name: POSTGRES_USER
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_USER
+          name: mujimed-postgres-secret
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_PASSWORD
+          name: mujimed-postgres-secret
+    - name: POSTGRES_DB
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_DB
+          name: mujimed-postgres-secret
+    - name: PGDATA
+      value: /var/lib/postgresql/data/pgdata
+  ports:
+    - containerPort: 5432
+      name: postgres
+      protocol: TCP
+  livenessProbe:
+    exec:
+      command:
+      - pg_isready
+      - -U
+      - mujimed
+      - -d
+      - mujimed
+    failureThreshold: 3
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  readinessProbe:
+    exec:
+      command:
+      - pg_isready
+      - -U
+      - mujimed
+      - -d
+      - mujimed
+    failureThreshold: 3
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    successThreshold: 1
+    timeoutSeconds: 3
+  resources:
+    limits:
+      cpu: '1'
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  volumeMounts:
+    - mountPath: /var/lib/postgresql/data
+      name: postgres-data
+  volumes:
+    - name: postgres-data
+      persistentVolumeClaim:
+        claimName: mujimed-db-pvc
+  service:
+    type: ClusterIP
+    labels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/part-of: mujimed
+    ports:
+      - port: 5432
+        protocol: TCP
+        targetPort: 5432
+
+tunnel:
+  enabled: true
+  containerName: cloudflared
+  replicas: 1
+  image: cloudflare/cloudflared:latest
+  imagePullPolicy: Always
+  selectorLabels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/part-of: mujimed
+  labels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/part-of: mujimed
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: 'true'
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  args:
+    - tunnel
+    - --no-autoupdate
+    - --metrics
+    - 0.0.0.0:2000
+    - run
+    - --token
+    - $(TUNNEL_TOKEN)
+  env:
+    - name: TUNNEL_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: CF_TUNNEL_TOKEN
+          name: mujimed-secrets
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+# RESTORED 2026-09-15. A generator bug briefly wrote backup.enabled=false here
+# (it looked only for CronJobs NOT managed by Helm, and this one already was),
+# and one upgrade deleted the CronJob. Recovered verbatim from the release's
+# own revision 1 manifest.
+backup:
+  enabled: true
+  name: pg-backup
+  schedule: 30 3 * * *
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  backoffLimit: 2
+  restartPolicy: OnFailure
+  labels:
+    app.kubernetes.io/component: db-backup
+    app.kubernetes.io/part-of: mujimed
+  containers:
+  - command:
+    - sh
+    - -c
+    - "set -euo pipefail\nmkdir -p /backups\n# ── R-1：等待 postgres 可連通 ────────────────────────────────\n# 新 pod 啟動時 NetworkPolicy 的 iptables 規則尚未程式化完成，\n# 此期間封包被 REJECT（pg_dump 收到 Connection refused）→ 產生 0-byte dump。\n# 上限 60 秒（勿縮小：#279/#280 實測該空窗可達 20–30 秒）；逾時以非零碼退出。\ni=0\nuntil pg_isready -h mujimed-postgres-svc -U mujimed -q; do\n  i=$((i+1))\n  if [ \"$i\" -ge 60 ]; then\n    echo \"R-1: postgres 於 60 秒內無法連通，放棄本次備份\" >&2\n    exit 1\n  fi\n  sleep 1\ndone\necho \"R-1: postgres 於第 ${i} 秒可連通\"\n# ─────────────────────────────────────────────────────────────\nOUT=/backups/mujimed_$(date +%Y%m%d_%H%M%S).pg\nPGPASSWORD=$POSTGRES_PASSWORD pg_dump -h mujimed-postgres-svc -U mujimed -d mujimed -Fc -f \"$OUT\"\ntest -s \"$OUT\"\nls -lh \"$OUT\"\nls -t /backups/mujimed_*.pg | tail -n +8 | xargs -r rm -f || true\n"
+    env:
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: POSTGRES_PASSWORD
+          name: mujimed-postgres-secret
+    image: postgres:16-alpine
+    imagePullPolicy: IfNotPresent
+    name: backup
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    volumeMounts:
+    - mountPath: /backups
+      name: backup
+  volumes:
+  - name: backup
+    persistentVolumeClaim:
+      claimName: mujimed-backup-pvc

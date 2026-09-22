@@ -1,0 +1,72 @@
+{{- if .Values.tunnel.enabled }}
+{{- /*
+The Cloudflare tunnel that publishes this tenant.
+
+THE TOKEN IS A CREDENTIAL. Most live tunnels read it from a Secret, but some
+carry it as a plain `--token` argument in the pod spec. The chart reproduces
+whichever the tenant already uses rather than silently changing how it is
+published - but a plain token must be passed with --set-string at install time
+and never committed.
+*/ -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "odoo-tenant.tunnelName" . }}
+  namespace: {{ include "odoo-tenant.ns" . }}
+  {{- with .Values.tunnel.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.tunnel.replicas }}
+  {{- with .Values.tunnel.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "odoo-tenant.tunnelSelector" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.tunnel.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "odoo-tenant.tunnelSelector" . | nindent 8 }}
+        {{- with .Values.tunnel.podExtraLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.tunnel.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: {{ .Values.tunnel.containerName }}
+        image: {{ .Values.tunnel.image }}
+        imagePullPolicy: {{ .Values.tunnel.imagePullPolicy }}
+        {{- with .Values.tunnel.args }}
+        args:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.tunnel.env }}
+        env:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.tunnel.lifecycle }}
+        lifecycle:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.tunnel.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.tunnel.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.tunnel.resources | nindent 10 }}
+{{- end }}

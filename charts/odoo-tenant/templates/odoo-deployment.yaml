@@ -1,0 +1,142 @@
+{{- /*
+The Odoo application: the server itself plus the nginx sidecar that fronts it.
+
+The init containers are carried VERBATIM from the live pod. They are not a
+shape this chart can derive - they are each tenant's own provisioning script,
+running anything from "wait for postgres" to cloning module repos, seeding the
+database or patching a websocket origin check. The longest is 7KB of shell. A
+takeover that regenerates them instead of reproducing them would restart the
+pod and, worse, might run something subtly different on the next boot.
+
+The volume list is carried verbatim for the same reason: which volumes exist,
+what backs them and what ORDER they appear in are all part of the pod template.
+*/ -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "odoo-tenant.odooName" . }}
+  namespace: {{ include "odoo-tenant.ns" . }}
+  {{- with .Values.odoo.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.odoo.replicas }}
+  strategy:
+    type: {{ .Values.odoo.strategy }}
+  selector:
+    matchLabels:
+      {{- include "odoo-tenant.odooSelector" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.odoo.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "odoo-tenant.odooSelector" . | nindent 8 }}
+        {{- with .Values.odoo.podExtraLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.odoo.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.odoo.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not (kindIs "invalid" .Values.odoo.automountServiceAccountToken) }}
+      automountServiceAccountToken: {{ .Values.odoo.automountServiceAccountToken }}
+      {{- end }}
+      {{- with .Values.odoo.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.odoo.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.odoo.initContainers }}
+      initContainers:
+        {{- /*
+             Six tenants' init-db script opens its own psycopg2 connection and so
+             carries the database password inside the script text. The values file
+             holds __PGPASSWORD__ there instead of the real one, and it is put back
+             here at render time from --set-string pgPassword=..., so the rendered
+             pod template still matches the live object byte for byte.
+             A tenant whose script does not need it renders untouched.
+        */}}
+        {{- $ic := toYaml . }}
+        {{- if contains "__PGPASSWORD__" $ic }}
+        {{- $ic = replace "__PGPASSWORD__" (required "pgPassword is required: this tenant's init-db script embeds the database password. Pass it with --set-string pgPassword=... and never commit the real value." $.Values.pgPassword) $ic }}
+        {{- end }}
+        {{- $ic | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: {{ .Values.odoo.containerName }}
+        image: {{ .Values.odoo.image }}
+        imagePullPolicy: {{ .Values.odoo.imagePullPolicy }}
+        {{- with .Values.odoo.command }}
+        command:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.odoo.env }}
+        env:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.odoo.ports }}
+        ports:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.odoo.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.odoo.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.odoo.startupProbe }}
+        startupProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.odoo.resources | nindent 10 }}
+        {{- with .Values.odoo.volumeMounts }}
+        volumeMounts:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if .Values.nginx.enabled }}
+      - name: {{ .Values.nginx.containerName }}
+        image: {{ .Values.nginx.image }}
+        imagePullPolicy: {{ .Values.nginx.imagePullPolicy }}
+        {{- with .Values.nginx.env }}
+        env:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nginx.ports }}
+        ports:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nginx.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.nginx.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.nginx.resources | nindent 10 }}
+        {{- with .Values.nginx.volumeMounts }}
+        volumeMounts:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.odoo.volumes }}
+      volumes:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
