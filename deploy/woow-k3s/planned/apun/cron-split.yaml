@@ -57,7 +57,7 @@
 #      from DNS, Postgres and mail.
 #  10. Merge the fold-in PR. Until then every helm upgrade of this release must
 #      pass BOTH files: the chart refuses an upgrade whose values would remove
-#      the cron Deployment while it runs.
+#      the cron Deployment while it exists, at any replica count.
 #  11. Tell the Apporo Home Connect line that its runbooks
 #      (~/work/apporo-home-connect/ops/runbooks) still assume one Odoo pod:
 #      gate1's odoo_restart() and gate2's §3.1, §3.7, R-A step 5, R-B and R-C

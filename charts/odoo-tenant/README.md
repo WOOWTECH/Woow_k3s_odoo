@@ -131,8 +131,8 @@ misbehave quietly):
   `httpGet` probe with `noHttp`.
 - With the split OFF: a web command that passes `--max-cron-threads=0` is
   refused (no pod would run the scheduled jobs), and so is an install or
-  upgrade while this release runs a cron Deployment with replicas > 0 - see
-  "Upgrading" below. That second check uses `lookup`, so it only acts against
+  upgrade while this release still has a cron Deployment, at any replica
+  count - see "Upgrading" below. That second check uses `lookup`, so it only acts against
   a cluster (`helm upgrade`, `--dry-run=server`); `helm template` and CI never
   see it.
 
@@ -232,22 +232,25 @@ may wait briefly for the volume while the deleted cron pod terminates.
 Pass the same values files the split was switched on with (the instance file
 and, until it is folded into it, the planned file). An upgrade whose values
 leave the split out - an image bump with the instance file alone, say - would
-delete the running cron pod, put the scheduled jobs back in the web pod, which
+delete the cron Deployment, put the scheduled jobs back in the web pod, which
 lacks the cron-only Secret env, and restart the site. The chart refuses it
-while the release's cron Deployment has replicas > 0. `--reuse-values` keeps
-the split, because it reuses the values the release was made with.
+while the release's cron Deployment exists, also at 0 replicas: in a
+maintenance stop both Deployments are at 0, and that is when such an upgrade
+is most likely. `--reuse-values` keeps the split, because it reuses the values
+the release was made with.
 
-To remove the split on purpose: scale the cron Deployment to 0, then either
-`helm rollback` to a revision from before the split (rollback does not render
-templates) or upgrade with values that turn it off and drop
-`--max-cron-threads=0` from the web command.
+To remove the split on purpose, either `helm rollback` to a revision from
+before the split (rollback does not render templates; scale the cron
+Deployment to 0 first), or scale the cron Deployment to 0, delete it, and
+upgrade with values that turn the split off and drop `--max-cron-threads=0`
+from the web command.
 
 Verified 2026-11-17 in `dev-sandbox-*` namespaces on woow-k3s (three
 schedulable nodes, a Longhorn RWO volume shared by both pods, then stock Odoo
 18 running this rendered cron command): the co-location rules in every restart
-order; the refusal of an upgrade that would drop a running cron Deployment
-(also under `--dry-run=server`), removal after scaling it to 0, and `helm
-rollback`; `--reuse-values` from a 1.0.0 release; a loopback-only cron pod
+order; the refusal of an upgrade that would drop the cron Deployment (also
+under `--dry-run=server` and at 0 replicas), removal after deleting it, and
+`helm rollback`; `--reuse-values` from a 1.0.0 release; a loopback-only cron pod
 with exec probes. See the pull request that added this section.
 
 ## Objects this chart references but never creates

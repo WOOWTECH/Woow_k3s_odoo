@@ -102,8 +102,8 @@ odoo:
     # N cron threads). The web's own odoo.command must pass
     # --max-cron-threads=0 to the odoo it runs; the render fails if it does not.
     # With the split off, the render fails if the web command passes 0 (no pod
-    # would run crons), and an upgrade fails while this release still runs a
-    # cron Deployment with replicas > 0 (README "Separate cron Deployment").
+    # would run crons), and an upgrade fails while this release still has a
+    # cron Deployment, at any replica count (README "Separate cron Deployment").
     maxCronThreads: 3
     # Database pool of the cron process. null keeps odoo.conf's db_maxconn.
     # Must be >= 3 x maxCronThreads: each threaded cron thread holds a LISTEN

@@ -121,15 +121,16 @@ Checks for a render WITHOUT the cron Deployment (odoo.cron.enabled false).
 1. The web command must not switch cron threads off: with no cron pod, nothing
    would run the scheduled jobs (mail queue, fetchmail, billing), and the site
    would look healthy while they silently stop.
-2. This release must not be running a cron Deployment right now. An upgrade
-   with values that leave the split out (an image bump passing only the
-   instance file, say) would delete the cron pod, move the jobs back into the
-   web pod - which lacks the cron-only Secret env - and restart the site.
-   `lookup` sees the cluster only in a real install/upgrade (and
-   --dry-run=server); `helm template` and CI get an empty result, so renders
-   are unaffected. Removing the split on purpose: scale the cron Deployment to
-   0 first (README "Separate cron Deployment"), or `helm rollback`, which does
-   not render templates.
+2. This release must not have a cron Deployment right now. An upgrade with
+   values that leave the split out (an image bump passing only the instance
+   file, say) would delete the cron Deployment, move the jobs back into the
+   web pod - which lacks the cron-only Secret env - and restart the site. That
+   holds at 0 replicas too (a maintenance stop scales both to 0), so the check
+   is on existence, not on replicas. `lookup` sees the cluster only in a real
+   install/upgrade (and --dry-run=server); `helm template` and CI get an empty
+   result, so renders are unaffected. Removing the split on purpose: scale the
+   cron Deployment to 0 and delete it, then upgrade (README "Separate cron
+   Deployment"); or `helm rollback`, which does not render templates.
 */}}
 {{- define "odoo-tenant.cronOffValidate" -}}
 {{- if eq (include "odoo-tenant.webCronThreads" .) "0" -}}
@@ -140,12 +141,12 @@ Checks for a render WITHOUT the cron Deployment (odoo.cron.enabled false).
 {{- $live := lookup "apps/v1" "Deployment" $ns $name -}}
 {{- if $live -}}
 {{- $ann := $live.metadata.annotations | default dict -}}
-{{- $replicas := 1 -}}
+{{- if and (eq (toString (get $ann "meta.helm.sh/release-name")) .Release.Name) (eq (toString (get $ann "meta.helm.sh/release-namespace")) .Release.Namespace) -}}
+{{- $replicas := "?" -}}
 {{- if hasKey ($live.spec | default dict) "replicas" -}}
-{{- $replicas = int $live.spec.replicas -}}
+{{- $replicas = toString (int $live.spec.replicas) -}}
 {{- end -}}
-{{- if and (eq (toString (get $ann "meta.helm.sh/release-name")) .Release.Name) (eq (toString (get $ann "meta.helm.sh/release-namespace")) .Release.Namespace) (gt $replicas 0) -}}
-{{- fail (printf "odoo.cron.enabled is false, but release %s runs Deployment %s/%s with %d replica(s). These values would delete the cron pod, move the scheduled jobs back into the web pod (which lacks the cron-only Secret env) and restart the site. Pass the same values files the release was installed with (the instance file plus its planned cron-split file until that is folded in). To remove the split on purpose, scale %s to 0 first" .Release.Name $ns $name $replicas $name) -}}
+{{- fail (printf "odoo.cron.enabled is false, but release %s has its cron Deployment %s/%s (replicas %s). These values would delete it, move the scheduled jobs back into the web pod (which lacks the cron-only Secret env) and restart the site. Pass the same values files the release was installed with (the instance file plus its planned cron-split file until that is folded in). To remove the split on purpose: scale %s to 0 and delete it, then upgrade; or helm rollback to a revision from before the split" .Release.Name $ns $name $replicas $name) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
