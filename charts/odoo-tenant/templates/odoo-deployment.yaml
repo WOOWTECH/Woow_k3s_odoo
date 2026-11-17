@@ -44,7 +44,7 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.odoo.cron.enabled }}
+      {{- if (.Values.odoo.cron | default dict).enabled }}
       {{- /*
            Only with the separate cron Deployment (odoo-cron-deployment.yaml).
            Both pods mount the same ReadWriteOnce volumes, which attach to one

@@ -29,6 +29,23 @@ helm --kube-context woow-k3s upgrade --install odoo-tenant charts/odoo-tenant \
 Verify the render against the live objects field by field BEFORE running it.
 Every tenant in `deploy/woow-k3s/` was adopted that way with zero pod restarts.
 
+Upgrade with `-f` and the instance file, like the install. `--reuse-values`
+renders the new templates with the defaults of the chart version the release
+was made with, so a new value's default never applies; the templates read
+values added after 1.0.0 through `| default dict` so that it at least renders.
+
+## A chart change must not change a tenant by accident
+
+The instance files are transcriptions of live objects: a chart change that
+alters a tenant's render restarts or breaks that tenant at its next `helm
+upgrade`. On every pull request, CI renders each instance file the pull
+request does not touch with the base branch's chart and with the new one and
+requires byte-identical output. To change a tenant's render on purpose, change
+that tenant's file in the same pull request and say why in its header; CI then
+leaves its render to the reviewer. CI also renders every instance with the new
+templates and the base branch's `values.yaml` (what `--reuse-values` does after
+a release made with the base chart) and requires that to succeed.
+
 ## Things that will bite you
 
 **Names do not all follow the rule.** Most objects are `<tenant>-odoo`,
@@ -99,12 +116,47 @@ What it renders:
   the cron pod needs in `odoo.cron.initContainers`.
 
 Render-time guards (each is a configuration that would otherwise deploy and
-misbehave quietly): the web's `odoo.command` must pass `--max-cron-threads=0`
-or the web keeps running cron jobs that then fail for lack of the cron-only
-credential; the web selector must have `app.kubernetes.io/component` plus one
-more label; `dbMaxconn >= 3 x maxCronThreads` (each threaded cron thread holds
-a LISTEN connection plus `cron_cr` and `job_cr`); `replicas` 0 or 1; no
-`httpGet` probe with `noHttp`.
+misbehave quietly):
+
+- The web's `odoo.command` must pass `--max-cron-threads=0` to the odoo it
+  runs, or the web keeps running cron jobs that then fail for lack of the
+  cron-only credential. Only the command's last shell segment counts (split on
+  newlines, `;`, `&&`, `||`, `|`, after joining `\`-continued lines), and in it
+  the last occurrence, as Odoo's option parser does: a flag that appears only
+  in an earlier `echo`, or `--max-cron-threads=0 --max-cron-threads=2`, is
+  refused. So is a command whose odoo is piped into another program.
+- The web selector must have `app.kubernetes.io/component` plus one more
+  label; `dbMaxconn >= 3 x maxCronThreads` (each threaded cron thread holds a
+  LISTEN connection plus `cron_cr` and `job_cr`); `replicas` 0 or 1; no
+  `httpGet` probe with `noHttp`.
+- With the split OFF: a web command that passes `--max-cron-threads=0` is
+  refused (no pod would run the scheduled jobs), and so is an install or
+  upgrade while this release runs a cron Deployment with replicas > 0 - see
+  "Upgrading" below. That second check uses `lookup`, so it only acts against
+  a cluster (`helm upgrade`, `--dry-run=server`); `helm template` and CI never
+  see it.
+
+**The cron pod should take no connections from other pods.** It holds the
+cron-only credential, and its Odoo HTTP server (threaded mode serves HTTP from
+the same process) answers anything that reaches it. WOOW keeps other pods out
+with NetworkPolicy. Where the namespace lets every pod reach every other one
+(apun's `default-deny-external` admits ingress from any pod in apun) an added
+policy cannot narrow that, because policies only add allows. Then bind the
+server to loopback with `extraArgs: [--http-interface=127.0.0.1]` and probe
+from inside the container with `exec` (the kubelet's `httpGet` arrives on the
+pod IP, where nothing listens any more):
+
+```yaml
+odoo:
+  cron:
+    extraArgs: [--http-interface=127.0.0.1]
+    livenessProbe:
+      exec:
+        command: [python3, -I, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/web/health', timeout=8)"]
+```
+
+`--no-http` also works but leaves nothing to probe and breaks anything that
+calls the server over loopback.
 
 **Threaded mode uses the per-worker memory limits for the whole process.**
 `limit_memory_soft` (over it the server re-executes itself) and
@@ -153,9 +205,38 @@ are force-deleted, and the volume stays attached to that node until then -
 the same as with a single pod. Force-delete both old pods; the replacements
 then schedule together.
 
+**The web pod can only go where the cron pod is.** If that node is cordoned,
+tainted, or short of the memory the web pod requests, a web-only restart
+(rollout, image bump, values change) leaves the new web pod `Pending` with
+`didn't match pod affinity rules`, and the site is down. Before the split the
+web pod would simply have gone to another node. Fix: scale the cron
+Deployment to 0; with no pod of the pair left, the web pod schedules anywhere
+it fits; then scale the cron Deployment back to 1 and it follows.
+
+**A stuck cron pod is silent.** If the cron pod is `Pending` (no room on the
+web pod's node, or the web at 0) or crash-looping, every scheduled job stops -
+mail queue, fetchmail, billing - while the site looks healthy. Watch the cron
+Deployment's available replicas and how long ago a cron last ran
+(`select now() - max(lastcall) from ir_cron where active`).
+
 **Rollback** of the switch: scale the cron Deployment to 0 first, then
 `helm rollback`. Rolling back without that still converges, but the web pod
 may wait briefly for the volume while the deleted cron pod terminates.
+
+### Upgrading a release that runs the split
+
+Pass the same values files the split was switched on with (the instance file
+and, until it is folded into it, the planned file). An upgrade whose values
+leave the split out - an image bump with the instance file alone, say - would
+delete the running cron pod, put the scheduled jobs back in the web pod, which
+lacks the cron-only Secret env, and restart the site. The chart refuses it
+while the release's cron Deployment has replicas > 0. `--reuse-values` keeps
+the split, because it reuses the values the release was made with.
+
+To remove the split on purpose: scale the cron Deployment to 0, then either
+`helm rollback` to a revision from before the split (rollback does not render
+templates) or upgrade with values that turn it off and drop
+`--max-cron-threads=0` from the web command.
 
 Verified 2026-11-17 in a `dev-sandbox-*` namespace on woow-k3s (three
 schedulable nodes, a Longhorn RWO volume shared by both pods, then stock Odoo

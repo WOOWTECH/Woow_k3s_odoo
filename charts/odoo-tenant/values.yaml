@@ -100,7 +100,10 @@ odoo:
     # Rendered as `odoo --config=<configPath> --workers=0 --max-cron-threads=N
     # [--db_maxconn=M] [--no-http] <extraArgs...>` (threaded mode: one process,
     # N cron threads). The web's own odoo.command must pass
-    # --max-cron-threads=0; the render fails if it does not.
+    # --max-cron-threads=0 to the odoo it runs; the render fails if it does not.
+    # With the split off, the render fails if the web command passes 0 (no pod
+    # would run crons), and an upgrade fails while this release still runs a
+    # cron Deployment with replicas > 0 (README "Separate cron Deployment").
     maxCronThreads: 3
     # Database pool of the cron process. null keeps odoo.conf's db_maxconn.
     # Must be >= 3 x maxCronThreads: each threaded cron thread holds a LISTEN
@@ -108,7 +111,10 @@ odoo:
     dbMaxconn: null
     # true: no HTTP server in the cron pod (its probes then cannot use httpGet).
     noHttp: false
-    # Appended to the odoo command line verbatim, one flag per entry.
+    # Appended to the odoo command line verbatim, one flag per entry. A cron
+    # pod that keeps its HTTP server for health checks but must not take
+    # connections from other pods uses --http-interface=127.0.0.1 here, with
+    # exec probes (README "Separate cron Deployment").
     extraArgs: []
     # Verbatim, like odoo.initContainers, but NOT inherited from them: those are
     # each tenant's provisioning scripts and must not run twice.

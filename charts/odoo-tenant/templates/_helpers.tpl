@@ -81,8 +81,73 @@ type on the way). Same labels as odoo-tenant.odooSelector.
 
 {{/* ── Separate cron Deployment (odoo.cron.*; off by default) ───────────── */}}
 
+{{/*
+odoo.cron and odoo.secretEnv are read through `| default dict` everywhere a
+render without the split reaches them. `helm upgrade --reuse-values` from a
+release made with chart 1.0.0 renders these templates with 1.0.0's defaults,
+which have neither key; a bare .Values.odoo.cron.enabled fails there with
+"nil pointer evaluating interface {}.enabled".
+*/}}
 {{- define "odoo-tenant.cronName" -}}
-{{ .Values.odoo.cron.name | default (printf "%s-cron" (include "odoo-tenant.odooName" .)) }}
+{{ (.Values.odoo.cron | default dict).name | default (printf "%s-cron" (include "odoo-tenant.odooName" .)) }}
+{{- end -}}
+
+{{/*
+The --max-cron-threads value the web container's Odoo really starts with, or ""
+when its command sets none. Only the command's LAST shell segment counts - the
+one that runs odoo; segments are split on newlines, ';', '&&', '||' and '|'
+after joining backslash-continued lines - and within it the LAST occurrence
+wins, as in Odoo's own option parser. So a flag that appears only in an earlier
+`echo`, or `--max-cron-threads=0 --max-cron-threads=2`, is not taken for 0.
+*/}}
+{{- define "odoo-tenant.webCronThreads" -}}
+{{- $cmd := join " " (.Values.odoo.command | default list) -}}
+{{- $cmd = regexReplaceAll "\\\\\\r?\\n" $cmd " " -}}
+{{- $last := "" -}}
+{{- range $seg := regexSplit "\\r?\\n|;|&&|\\|\\||\\|" $cmd -1 -}}
+{{- if trim $seg -}}
+{{- $last = $seg -}}
+{{- end -}}
+{{- end -}}
+{{- $flags := regexFindAll "--max-cron-threads(=|[ \\t]+)[0-9]+" $last -1 -}}
+{{- if $flags -}}
+{{- regexReplaceAll "^--max-cron-threads(=|[ \\t]+)" (last $flags) "" | atoi -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Checks for a render WITHOUT the cron Deployment (odoo.cron.enabled false).
+
+1. The web command must not switch cron threads off: with no cron pod, nothing
+   would run the scheduled jobs (mail queue, fetchmail, billing), and the site
+   would look healthy while they silently stop.
+2. This release must not be running a cron Deployment right now. An upgrade
+   with values that leave the split out (an image bump passing only the
+   instance file, say) would delete the cron pod, move the jobs back into the
+   web pod - which lacks the cron-only Secret env - and restart the site.
+   `lookup` sees the cluster only in a real install/upgrade (and
+   --dry-run=server); `helm template` and CI get an empty result, so renders
+   are unaffected. Removing the split on purpose: scale the cron Deployment to
+   0 first (README "Separate cron Deployment"), or `helm rollback`, which does
+   not render templates.
+*/}}
+{{- define "odoo-tenant.cronOffValidate" -}}
+{{- if eq (include "odoo-tenant.webCronThreads" .) "0" -}}
+{{- fail "odoo.command passes --max-cron-threads=0 but odoo.cron.enabled is false: no pod would run Odoo's scheduled jobs. Turn the cron Deployment on, or drop the flag from the web command" -}}
+{{- end -}}
+{{- $ns := include "odoo-tenant.ns" . -}}
+{{- $name := include "odoo-tenant.cronName" . -}}
+{{- $live := lookup "apps/v1" "Deployment" $ns $name -}}
+{{- if $live -}}
+{{- $ann := $live.metadata.annotations | default dict -}}
+{{- $replicas := 1 -}}
+{{- if hasKey ($live.spec | default dict) "replicas" -}}
+{{- $replicas = int $live.spec.replicas -}}
+{{- end -}}
+{{- if and (eq (toString (get $ann "meta.helm.sh/release-name")) .Release.Name) (eq (toString (get $ann "meta.helm.sh/release-namespace")) .Release.Namespace) (gt $replicas 0) -}}
+{{- fail (printf "odoo.cron.enabled is false, but release %s runs Deployment %s/%s with %d replica(s). These values would delete the cron pod, move the scheduled jobs back into the web pod (which lacks the cron-only Secret env) and restart the site. Pass the same values files the release was installed with (the instance file plus its planned cron-split file until that is folded in). To remove the split on purpose, scale %s to 0 first" .Release.Name $ns $name $replicas $name) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -127,9 +192,8 @@ a configuration that would otherwise deploy and misbehave quietly.
 {{- if not (omit $web "app.kubernetes.io/component") -}}
 {{- fail "odoo.cron.enabled: the web selector needs at least one label besides app.kubernetes.io/component, or the web/cron co-location rule would match unrelated pods in the namespace" -}}
 {{- end -}}
-{{- $cmd := join " " (.Values.odoo.command | default list) -}}
-{{- if not (regexMatch "--max-cron-threads[= ]0([^0-9]|$)" $cmd) -}}
-{{- fail "odoo.cron.enabled: the web container's odoo.command must pass --max-cron-threads=0. Otherwise the web pod keeps running cron jobs too, and any job that needs a cron-only credential (odoo.secretEnv.cron) fails there" -}}
+{{- if ne (include "odoo-tenant.webCronThreads" .) "0" -}}
+{{- fail "odoo.cron.enabled: the web container's odoo.command must pass --max-cron-threads=0 to the odoo it runs (last shell segment, last occurrence). Otherwise the web pod keeps running cron jobs too, and any job that needs a cron-only credential (odoo.secretEnv.cron) fails there" -}}
 {{- end -}}
 {{- if not $c.configPath -}}
 {{- fail "odoo.cron.configPath is required: the odoo.conf path inside the container (the web reads the same file)" -}}

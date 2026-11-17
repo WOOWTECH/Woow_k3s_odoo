@@ -18,10 +18,17 @@ Odoo runs the same split for its New API signing keys.
   so the two are always scheduled onto one node and never fight over a volume.
   With the web at 0 replicas this pod stays Pending: stopping Odoo means
   scaling both Deployments. See README "Separate cron Deployment".
+
+With the split off, odoo-tenant.cronOffValidate still runs: it refuses a web
+command that switches cron threads off, and an upgrade that would silently
+remove a cron Deployment this release is running.
 */ -}}
-{{- $c := .Values.odoo.cron }}
-{{- if and (not $c.enabled) .Values.odoo.secretEnv.cron }}
+{{- $c := .Values.odoo.cron | default dict }}
+{{- if and (not $c.enabled) (.Values.odoo.secretEnv | default dict).cron }}
 {{- fail "odoo.secretEnv.cron is set but odoo.cron.enabled is false: without the cron Deployment those variables reach no pod. Turn the split on, or move a variable the single pod really needs to odoo.secretEnv.web on purpose" }}
+{{- end }}
+{{- if not $c.enabled }}
+{{- include "odoo-tenant.cronOffValidate" . }}
 {{- end }}
 {{- if $c.enabled }}
 {{- include "odoo-tenant.cronValidate" . }}
