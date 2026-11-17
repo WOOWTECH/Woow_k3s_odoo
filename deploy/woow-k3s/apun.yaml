@@ -13,7 +13,7 @@ odoo:
   containerName: odoo
   replicas: 1
   strategy: Recreate
-  image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
+  image: ghcr.io/woowtech/apporo-odoo:20261117.1040@sha256:27a4146a885343eb9b29a8f67e6a5ce414459ce1ab5ed90b19a4753c8bb8d1e2
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:
