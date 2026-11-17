@@ -9,7 +9,12 @@
 #
 # Web and cron still run in this one pod. The planned split into a web pod and
 # a cron pod is deploy/woow-k3s/planned/apun/cron-split.yaml, switched on only
-# in a scheduled outage (procedure in that file's header).
+# in a scheduled outage (procedure in that file's header). Once it has been
+# switched on, and until that file is folded in here, every helm upgrade of
+# this release passes both files, in this order:
+#   -f deploy/woow-k3s/apun.yaml -f deploy/woow-k3s/planned/apun/cron-split.yaml
+# With this file alone the chart refuses the upgrade (it would delete the
+# running cron pod and put the scheduled jobs back in the web pod).
 
 tenant: apun
 
