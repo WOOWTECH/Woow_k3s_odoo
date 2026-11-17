@@ -199,6 +199,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # On a pull request HEAD is GitHub's merge commit and HEAD^1 the base
+          # branch it was merged onto; the render comparison below needs both.
+          fetch-depth: 2
 
       - name: Setup Helm
         uses: azure/setup-helm@v4
@@ -302,6 +306,50 @@ jobs:
           done
           [ "$fail" -eq 0 ] || exit 1
 
+      # The instance files are transcriptions of live objects, so a chart change
+      # that alters a tenant's render restarts or breaks that tenant at its next
+      # helm upgrade. Every instance file this pull request leaves alone must
+      # render byte for byte as the base branch's chart renders it. To change a
+      # tenant's render on purpose, change that tenant's file in the same pull
+      # request and say why in its header; its render is then left to review.
+      # Second check: the new templates with the base branch's values.yaml, which
+      # is what `helm upgrade --reuse-values` renders after a release made with
+      # the base chart, must still render.
+      - name: Chart changes leave untouched tenants' renders byte-identical
+        if: github.event_name == 'pull_request'
+        run: |
+          base=$(git rev-parse HEAD^1)
+          if ! git cat-file -e "$base:charts/odoo-tenant/Chart.yaml" 2>/dev/null; then
+            echo "the base branch has no charts/odoo-tenant; nothing to compare"; exit 0
+          fi
+          mkdir -p /tmp/base /tmp/tb /tmp/reuse
+          git archive "$base" charts/odoo-tenant deploy/woow-k3s | tar -x -C /tmp/base
+          cp -r charts/odoo-tenant /tmp/reuse/
+          cp /tmp/base/charts/odoo-tenant/values.yaml /tmp/reuse/odoo-tenant/values.yaml
+          fail=0
+          for f in deploy/woow-k3s/*.yaml; do
+            ns=$(basename "$f" .yaml)
+            if ! helm template odoo-tenant /tmp/reuse/odoo-tenant -n "$ns" -f "$f" \
+                 --set-string pgPassword=dummy > "/tmp/reuse/$ns.yaml" 2>"/tmp/reuse/$ns.err"; then
+              echo "::error file=$f::does not render with the base branch's values.yaml, so helm upgrade --reuse-values of a release made with the base chart would fail"
+              sed 's/^/    /' "/tmp/reuse/$ns.err"; fail=1
+            fi
+            if [ ! -f "/tmp/base/$f" ] || ! cmp -s "$f" "/tmp/base/$f"; then
+              echo "  $ns: instance file changed in this pull request; its render is reviewed by hand"; continue
+            fi
+            if ! helm template odoo-tenant /tmp/base/charts/odoo-tenant -n "$ns" -f "/tmp/base/$f" \
+                 --set-string pgPassword=dummy > "/tmp/tb/$ns.yaml" 2>"/tmp/tb/$ns.err"; then
+              echo "::warning file=$f::the base branch's chart does not render this file; not compared"; continue
+            fi
+            if cmp -s "/tmp/tb/$ns.yaml" "/tmp/t/$ns.yaml"; then
+              echo "  $ns: identical"
+            else
+              echo "::error file=$f::this chart change alters what $ns renders (base branch chart vs this one):"
+              diff -u "/tmp/tb/$ns.yaml" "/tmp/t/$ns.yaml" | head -80 | sed 's/^/    /'; fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+
       # A planned switch is a values file layered on its instance at a scheduled
       # change: deploy/woow-k3s/planned/<instance>/<change>.yaml. It is not an
       # instance itself (the loops above never see it), so render it here.
@@ -327,12 +375,23 @@ jobs:
       # What the separate cron Deployment (odoo.cron) is for, checked on every
       # planned switch that turns it on: the cron pod is invisible to the web
       # Service, the two pods are always scheduled together (ReadWriteOnce data),
-      # and each component's Secret-backed variables reach only that component.
+      # each component's Secret-backed variables reach only that component, both
+      # get the same plain env, and the cron pod, which holds the cron-only
+      # credential, takes no connections from other pods. On every planned file:
+      # an odoo.env it restates still starts with the instance file's entries.
       - name: Cron split keeps the pods together and the keys apart
         run: |
           python3 - <<'EOF'
-          import glob, os, sys, yaml
+          import glob, os, re, sys, yaml
           def load(p): return yaml.safe_load(open(p)) or {}
+          LOOPBACK = ("127.0.0.1", "localhost", "::1")
+          def cron_threads(cmd):
+              # The chart's rule (odoo-tenant.webCronThreads): the command's last
+              # shell segment, and the last occurrence in it.
+              s = re.sub(r"\\\r?\n", " ", " ".join(cmd or []))
+              segs = [x for x in re.split(r"\r?\n|;|&&|\|\||\|", s) if x.strip()]
+              found = re.findall(r"--max-cron-threads(?:=|[ \t]+)([0-9]+)", segs[-1] if segs else "")
+              return int(found[-1]) if found else None
           def matches(sel, labels):
               for k, v in (sel.get("matchLabels") or {}).items():
                   if labels.get(k) != v: return False
@@ -346,12 +405,19 @@ jobs:
           bad, checked = [], 0
           for f in sorted(glob.glob("deploy/woow-k3s/planned/*/*.yaml")):
               inst_name = os.path.basename(os.path.dirname(f))
+              def err(m): bad.append(f"{f}: {m}")
+              # A list in a planned file replaces the instance's list. If the
+              # instance file gains an env entry later, the restated copy must
+              # follow, or the switch would silently drop it.
+              inst_env = (load(f"deploy/woow-k3s/{inst_name}.yaml").get("odoo") or {}).get("env") or []
+              plan_env = (load(f).get("odoo") or {}).get("env")
+              if plan_env is not None and plan_env[:len(inst_env)] != inst_env:
+                  err(f"odoo.env must start with deploy/woow-k3s/{inst_name}.yaml's odoo.env, entry for entry")
               docs = [d for d in yaml.safe_load_all(open(f"/tmp/tp/{inst_name}-{os.path.basename(f)}")) if d]
               deps = [d for d in docs if d["kind"] == "Deployment"]
               crons = [d for d in deps if d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/component") == "cron"]
               if not crons: continue
               checked += 1
-              def err(m): bad.append(f"{f}: {m}")
               if len(crons) != 1: err(f"{len(crons)} cron Deployments"); continue
               cron = crons[0]; cs = cron["spec"]["template"]["spec"]
               cron_labels = cron["spec"]["template"]["metadata"]["labels"]
@@ -373,10 +439,21 @@ jobs:
               for d in (web, cron):
                   if d["spec"]["strategy"]["type"] != "Recreate": err(f"{d['metadata']['name']} is not Recreate")
               wc = ws["containers"][0]; cc = cs["containers"][0]
-              if "--max-cron-threads=0" not in " ".join(wc.get("command") or []): err("the web command lacks --max-cron-threads=0")
-              if "--workers=0" not in (cc.get("command") or []): err("the cron command lacks --workers=0")
+              if cron_threads(wc.get("command")) != 0: err("the web command does not pass --max-cron-threads=0 to the odoo it runs")
+              ccmd = cc.get("command") or []
+              if "--workers=0" not in ccmd: err("the cron command lacks --workers=0")
+              # Odoo binds the last --http-interface it is given.
+              iface = (re.findall(r"--http-interface(?:=|\s+)(\S+)", " ".join(ccmd)) or [None])[-1]
+              if "--no-http" not in ccmd and iface not in LOOPBACK:
+                  err("the cron pod's Odoo HTTP server would listen on the pod network: pass --no-http or --http-interface=127.0.0.1")
+              if cc.get("ports"): err("the cron container declares ports; it must serve nothing to other pods")
+              for p in ("startupProbe", "livenessProbe", "readinessProbe"):
+                  if set(cc.get(p) or {}) & {"httpGet", "tcpSocket", "grpc"}:
+                      err(f"the cron {p} connects to the pod IP, where the cron pod must not listen; use an exec probe")
               se = merged_secret_env(load(f"deploy/woow-k3s/{inst_name}.yaml"), load(f))
               all_se = se["both"] | se["web"] | se["cron"]
+              plain = lambda c: [e for e in c.get("env") or [] if e["name"] not in all_se]
+              if plain(wc) != plain(cc): err("the web and cron containers get different plain env; both must see odoo.env as is")
               for name, c, want, never in (("web", wc, se["both"] | se["web"], se["cron"]),
                                            ("cron", cc, se["both"] | se["cron"], se["web"])):
                   env = {e["name"]: e for e in c.get("env") or []}
@@ -406,9 +483,29 @@ jobs:
             if echo "$out" | grep -qF -- "$msg"; then echo "  refused: $msg"
             else echo "::error::wrong failure for $*: $out"; fail=1; fi
           }
+          expect_ok() {  # <what> <helm template args...>
+            what=$1; shift
+            if out=$(helm template odoo-tenant charts/odoo-tenant -n apun "$@" 2>&1); then echo "  renders: $what"
+            else echo "::error::refused although valid ($what): $out"; fail=1; fi
+          }
           # The web would keep running cron jobs that need the cron-only key.
           expect_fail "must pass --max-cron-threads=0" $base \
             --set-json 'odoo.command=["bash","-c","exec odoo --config=/etc/odoo/odoo.conf\n"]'
+          # ...also when the flag is only echoed, or a later occurrence wins.
+          expect_fail "must pass --max-cron-threads=0" $base \
+            --set-json 'odoo.command=["bash","-c","echo --max-cron-threads=0\nexec odoo --config=/etc/odoo/odoo.conf\n"]'
+          expect_fail "must pass --max-cron-threads=0" $base \
+            --set-json 'odoo.command=["bash","-c","exec odoo --config=/etc/odoo/odoo.conf --max-cron-threads=0 --max-cron-threads=2\n"]'
+          # Forms Odoo accepts must stay accepted.
+          expect_ok "space-separated flag" $base \
+            --set-json 'odoo.command=["bash","-c","exec odoo --config=/etc/odoo/odoo.conf --max-cron-threads 0\n"]'
+          expect_ok "backslash-continued exec line" $base \
+            --set-json 'odoo.command=["bash","-c","exec odoo \\\n  --max-cron-threads=0 \\\n  --config=/etc/odoo/odoo.conf\n"]'
+          expect_ok "exec form" $base \
+            --set-json 'odoo.command=["odoo","--config=/etc/odoo/odoo.conf","--max-cron-threads","0"]'
+          # Split off while the web runs no cron threads: nothing would run them.
+          expect_fail "no pod would run Odoo's scheduled jobs" -f deploy/woow-k3s/apun.yaml \
+            --set-json 'odoo.command=["bash","-c","exec odoo --config=/etc/odoo/odoo.conf --max-cron-threads=0\n"]'
           # Cron-only variables with no cron pod to receive them.
           expect_fail "odoo.secretEnv.cron is set but odoo.cron.enabled is false" -f deploy/woow-k3s/apun.yaml \
             --set-json 'odoo.secretEnv.cron=[{"name":"X","secretName":"s","key":"k"}]'
