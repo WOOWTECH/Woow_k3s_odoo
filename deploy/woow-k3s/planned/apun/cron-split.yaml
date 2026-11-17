@@ -72,8 +72,12 @@
 #   - The web pod may only run where the cron pod runs. If that node is
 #     cordoned, tainted or short of memory, a web-only restart (rollout, image
 #     bump, values change) leaves the web pod Pending with "didn't match pod
-#     affinity rules" and the site down. Fix: scale apun-odoo-cron to 0, let the
-#     web pod schedule, then scale apun-odoo-cron back to 1 (it follows the web).
+#     affinity rules" and the site down. Fix: scale apun-odoo-cron to 0, wait
+#     for its pod to go, delete the Pending web pod, then scale apun-odoo-cron
+#     back to 1 (it follows the web). Deleting the Pending pod matters: the
+#     scheduler retries a pod it has parked only every 5 minutes (sandbox:
+#     302 s without the delete, 30 s with it). A few "Multi-Attach" events
+#     while the volume moves between nodes are normal.
 #   - If the cron pod is Pending or crash-looping, every scheduled job stops
 #     (mail queue, fetchmail, LLM billing) while the site looks healthy. Daily
 #     check: `kubectl -n apun get deploy apun-odoo-cron` shows 1/1 available,

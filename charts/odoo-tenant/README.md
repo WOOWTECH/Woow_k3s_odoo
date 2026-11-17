@@ -210,8 +210,12 @@ tainted, or short of the memory the web pod requests, a web-only restart
 (rollout, image bump, values change) leaves the new web pod `Pending` with
 `didn't match pod affinity rules`, and the site is down. Before the split the
 web pod would simply have gone to another node. Fix: scale the cron
-Deployment to 0; with no pod of the pair left, the web pod schedules anywhere
-it fits; then scale the cron Deployment back to 1 and it follows.
+Deployment to 0 and wait for its pod to go, then delete the Pending web pod;
+with no pod of the pair left, its replacement schedules anywhere it fits.
+Then scale the cron Deployment back to 1 and it follows. Delete the Pending
+pod rather than wait: the scheduler retries a pod it has parked only every 5
+minutes (sandbox, 2026-11-17: 302 s without the delete, 30 s with it, of which
+about 25 s were `Multi-Attach` retries while the volume moved between nodes).
 
 **A stuck cron pod is silent.** If the cron pod is `Pending` (no room on the
 web pod's node, or the web at 0) or crash-looping, every scheduled job stops -
@@ -238,10 +242,13 @@ To remove the split on purpose: scale the cron Deployment to 0, then either
 templates) or upgrade with values that turn it off and drop
 `--max-cron-threads=0` from the web command.
 
-Verified 2026-11-17 in a `dev-sandbox-*` namespace on woow-k3s (three
+Verified 2026-11-17 in `dev-sandbox-*` namespaces on woow-k3s (three
 schedulable nodes, a Longhorn RWO volume shared by both pods, then stock Odoo
-18 running this rendered cron command): see the pull request that added this
-section.
+18 running this rendered cron command): the co-location rules in every restart
+order; the refusal of an upgrade that would drop a running cron Deployment
+(also under `--dry-run=server`), removal after scaling it to 0, and `helm
+rollback`; `--reuse-values` from a 1.0.0 release; a loopback-only cron pod
+with exec probes. See the pull request that added this section.
 
 ## Objects this chart references but never creates
 
