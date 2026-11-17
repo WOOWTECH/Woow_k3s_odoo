@@ -6,6 +6,10 @@
 # carried verbatim. Do not regenerate or 'tidy' them.
 #
 # SAFETY: never set `namespace:` here - placement is `-n` only.
+#
+# Web and cron still run in this one pod. The planned split into a web pod and
+# a cron pod is deploy/woow-k3s/planned/apun/cron-split.yaml, switched on only
+# in a scheduled outage (procedure in that file's header).
 
 tenant: apun
 
@@ -13,7 +17,12 @@ odoo:
   containerName: odoo
   replicas: 1
   strategy: Recreate
-  image: odoo@sha256:4ea9b4667921130add13c1b859aa170a4572b5c3c3d747bfb0ef152fdb0b48a7
+  # www.apporo.ai's own build (stock Odoo core + the PaaS platform modules under
+  # /opt/apporo/addons, which odoo.conf's addons_path names). Stock odoo would
+  # start without those modules and break the site. Private on ghcr: pulled via
+  # the namespace's default ServiceAccount (imagePullSecrets ghcr-pull-secret),
+  # because this chart has no odoo.imagePullSecrets. Revision 12, 2026-11-17.
+  image: ghcr.io/woowtech/apporo-odoo:20261116.1855@sha256:1d0b419d6b3e995e2c88bdd83064ab89c693629c5240bb24f2f5a8cc23ee1330
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:
