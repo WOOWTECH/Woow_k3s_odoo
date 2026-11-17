@@ -1,0 +1,137 @@
+{{- /*
+Optional separate cron Deployment (odoo.cron.enabled, default false).
+
+Every tenant runs its crons inside the web pod, and with the defaults this
+file renders nothing. A tenant turns it on when cron jobs use a credential the
+internet-facing web pod must not hold (odoo.secretEnv.cron) - WOOW's platform
+Odoo runs the same split for its New API signing keys.
+
+- Same image, config and data as the web pod: the container mounts what the
+  web's odoo container mounts (odoo.volumeMounts unless odoo.cron.volumeMounts
+  is set), and the pod gets only the odoo.volumes entries those mounts name.
+- Odoo in threaded mode (--workers=0) with cron threads only. The web must
+  start with --max-cron-threads=0 (odoo-tenant.cronValidate fails otherwise).
+- Labels: the web selector with app.kubernetes.io/component=cron. No Service;
+  the web Service selects the web's component, never this pod.
+- ReadWriteOnce data: required podAffinity to the web pod's node. The web pod
+  has the mirror-image term while this Deployment exists (odoo-deployment.yaml),
+  so the two are always scheduled onto one node and never fight over a volume.
+  With the web at 0 replicas this pod stays Pending: stopping Odoo means
+  scaling both Deployments. See README "Separate cron Deployment".
+*/ -}}
+{{- $c := .Values.odoo.cron }}
+{{- if and (not $c.enabled) .Values.odoo.secretEnv.cron }}
+{{- fail "odoo.secretEnv.cron is set but odoo.cron.enabled is false: without the cron Deployment those variables reach no pod. Turn the split on, or move a variable the single pod really needs to odoo.secretEnv.web on purpose" }}
+{{- end }}
+{{- if $c.enabled }}
+{{- include "odoo-tenant.cronValidate" . }}
+{{- $webSel := include "odoo-tenant.odooSelectorMap" . | fromJson }}
+{{- $sel := include "odoo-tenant.cronSelectorMap" . | fromJson }}
+{{- $cmd := list "odoo" (printf "--config=%s" $c.configPath) "--workers=0" (printf "--max-cron-threads=%d" ($c.maxCronThreads | int)) }}
+{{- with $c.dbMaxconn }}
+{{- $cmd = append $cmd (printf "--db_maxconn=%d" (int .)) }}
+{{- end }}
+{{- if $c.noHttp }}
+{{- $cmd = append $cmd "--no-http" }}
+{{- end }}
+{{- range $c.extraArgs }}
+{{- $cmd = append $cmd (toString .) }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "odoo-tenant.cronName" . }}
+  namespace: {{ include "odoo-tenant.ns" . }}
+  labels:
+    {{- toYaml (merge (deepCopy $sel) (omit (.Values.odoo.labels | default dict) "app.kubernetes.io/component")) | nindent 4 }}
+spec:
+  replicas: {{ $c.replicas | int }}
+  # One cron process at a time, never a surge pod; like the web, never
+  # RollingUpdate.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+  template:
+    metadata:
+      {{- with $c.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- toYaml $sel | nindent 8 }}
+    spec:
+      {{- with .Values.odoo.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Same node as the web pod: the ReadWriteOnce volumes attach to one node.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                {{- toYaml $webSel | nindent 16 }}
+            topologyKey: kubernetes.io/hostname
+      {{- with .Values.odoo.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not (kindIs "invalid" .Values.odoo.automountServiceAccountToken) }}
+      automountServiceAccountToken: {{ .Values.odoo.automountServiceAccountToken }}
+      {{- end }}
+      {{- with .Values.odoo.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.odoo.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.initContainers }}
+      initContainers:
+        {{- /* Same __PGPASSWORD__ substitution as the web's init containers. */}}
+        {{- $ic := toYaml . }}
+        {{- if contains "__PGPASSWORD__" $ic }}
+        {{- $ic = replace "__PGPASSWORD__" (required "pgPassword is required: a cron init container embeds the database password. Pass it with --set-string pgPassword=... and never commit the real value." $.Values.pgPassword) $ic }}
+        {{- end }}
+        {{- $ic | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: {{ .Values.odoo.containerName }}
+        image: {{ .Values.odoo.image }}
+        imagePullPolicy: {{ .Values.odoo.imagePullPolicy }}
+        # `command`, not `args`, like the web: the image entrypoint would add
+        # the database credentials from the environment to the command line.
+        command:
+          {{- toYaml $cmd | nindent 8 }}
+        {{- /* odoo.env verbatim, then odoo.secretEnv.both and .cron */}}
+        {{- with include "odoo-tenant.env" (list . "cron") }}
+        env:
+          {{- . | nindent 8 }}
+        {{- end }}
+        {{- with $c.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $c.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $c.startupProbe }}
+        startupProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          {{- toYaml ($c.resources | default dict) | nindent 10 }}
+        {{- with ($c.volumeMounts | default .Values.odoo.volumeMounts) }}
+        volumeMounts:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with include "odoo-tenant.cronVolumes" . }}
+      volumes:
+        {{- . | nindent 6 }}
+      {{- end }}
+{{- end }}

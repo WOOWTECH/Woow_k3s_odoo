@@ -44,6 +44,24 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.odoo.cron.enabled }}
+      {{- /*
+           Only with the separate cron Deployment (odoo-cron-deployment.yaml).
+           Both pods mount the same ReadWriteOnce volumes, which attach to one
+           node at a time, so they must always be scheduled together. The cron
+           pod follows the web pod; this term makes the web pod follow a cron
+           pod that is still running (a web-only restart), instead of landing on
+           another node and hanging in ContainerCreating on Multi-Attach. The
+           web pod matches the term itself, so with no pod of the pair running
+           it schedules as before (the scheduler's first-pod-of-a-group rule).
+      */}}
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              {{- include "odoo-tenant.odooGroupSelector" . | nindent 14 }}
+            topologyKey: kubernetes.io/hostname
+      {{- end }}
       {{- with .Values.odoo.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -83,9 +101,10 @@ spec:
         command:
           {{- toYaml . | nindent 8 }}
         {{- end }}
-        {{- with .Values.odoo.env }}
+        {{- /* odoo.env verbatim, then odoo.secretEnv.both and .web (see _helpers.tpl) */}}
+        {{- with include "odoo-tenant.env" (list . "web") }}
         env:
-          {{- toYaml . | nindent 8 }}
+          {{- . | nindent 8 }}
         {{- end }}
         {{- with .Values.odoo.ports }}
         ports:

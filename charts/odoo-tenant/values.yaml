@@ -54,6 +54,20 @@ odoo:
   initContainers: []
   command: []
   env: []
+  # Environment variables read from Secrets, per Odoo component. Each entry is
+  #   {name: <ENV_NAME>, secretName: <Secret>, key: <key in it>}  (+ optional: true)
+  # and renders as valueFrom.secretKeyRef after `env` above - never as a literal,
+  # so a credential cannot be committed through these lists (any other field is
+  # refused, and so is a name already set in the same container).
+  secretEnv:
+    # Every Odoo container this chart renders: the web pod, and the cron pod
+    # when cron.enabled.
+    both: []
+    # The web container only.
+    web: []
+    # The cron container only. Refused unless cron.enabled: without the cron
+    # Deployment these would reach no pod.
+    cron: []
   ports: []
   livenessProbe: {}
   readinessProbe: {}
@@ -68,6 +82,46 @@ odoo:
     type: ClusterIP
     labels: {}
     ports: []
+  # Separate cron Deployment. OFF: every tenant runs its crons inside the web
+  # pod, and with this off nothing about any tenant's render changes. On, it
+  # adds Deployment <odoo name>-cron (no Service) that runs only Odoo's cron
+  # threads, so a credential that only cron jobs use (odoo.secretEnv.cron)
+  # never sits in the web pod. See README "Separate cron Deployment" before
+  # turning it on: the switch restarts the web pod and changes how Odoo is
+  # stopped (both Deployments, not one).
+  cron:
+    enabled: false
+    # Overrides the derived `<odoo name>-cron`.
+    name: ""
+    # 0 or 1. One cron pod per tenant; to scale cron work, raise maxCronThreads.
+    replicas: 1
+    # The same odoo.conf the web reads, at this path inside the container.
+    configPath: /etc/odoo/odoo.conf
+    # Rendered as `odoo --config=<configPath> --workers=0 --max-cron-threads=N
+    # [--db_maxconn=M] [--no-http] <extraArgs...>` (threaded mode: one process,
+    # N cron threads). The web's own odoo.command must pass
+    # --max-cron-threads=0; the render fails if it does not.
+    maxCronThreads: 3
+    # Database pool of the cron process. null keeps odoo.conf's db_maxconn.
+    # Must be >= 3 x maxCronThreads: each threaded cron thread holds a LISTEN
+    # connection plus cron_cr and job_cr from the same pool.
+    dbMaxconn: null
+    # true: no HTTP server in the cron pod (its probes then cannot use httpGet).
+    noHttp: false
+    # Appended to the odoo command line verbatim, one flag per entry.
+    extraArgs: []
+    # Verbatim, like odoo.initContainers, but NOT inherited from them: those are
+    # each tenant's provisioning scripts and must not run twice.
+    initContainers: []
+    # [] = mount exactly what the web's odoo container mounts (odoo.volumeMounts).
+    # The pod gets only the odoo.volumes entries these mounts (and the cron init
+    # containers' mounts) name - the nginx sidecar's volumes stay out.
+    volumeMounts: []
+    podAnnotations: {}
+    livenessProbe: {}
+    readinessProbe: {}
+    startupProbe: {}
+    resources: {}
 
 # The nginx sidecar that fronts Odoo in the same pod. Every live tenant has one.
 nginx:

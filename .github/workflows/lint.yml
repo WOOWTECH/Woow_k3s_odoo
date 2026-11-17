@@ -206,7 +206,15 @@ jobs:
           version: v3.19.5
 
       - name: helm lint
-        run: helm lint charts/odoo-tenant --set-string pgPassword=dummy
+        run: |
+          helm lint charts/odoo-tenant --set-string pgPassword=dummy
+          # A planned switch (deploy/woow-k3s/planned/<instance>/<change>.yaml)
+          # is linted on top of the instance it is for.
+          for f in deploy/woow-k3s/planned/*/*.yaml; do
+            [ -e "$f" ] || continue
+            inst=$(basename "$(dirname "$f")")
+            helm lint charts/odoo-tenant -f "deploy/woow-k3s/$inst.yaml" -f "$f" --set-string pgPassword=dummy
+          done
 
       - name: No credential is committed
         run: |
@@ -220,7 +228,9 @@ jobs:
           # A cloudflared token or a long opaque path is the other shape of leak.
           blob = re.compile(r"[A-Za-z0-9+/=]{120,}")
           bad = []
-          for f in sorted(glob.glob("deploy/woow-k3s/*.yaml")):
+          # Recursive: a planned switch under deploy/woow-k3s/planned/ is as
+          # public as an instance file.
+          for f in sorted(glob.glob("deploy/woow-k3s/**/*.yaml", recursive=True)):
               raw = open(f).read()
               for m in conn.finditer(raw):
                   if m.group(1) != "__PGPASSWORD__":
@@ -292,12 +302,134 @@ jobs:
           done
           [ "$fail" -eq 0 ] || exit 1
 
+      # A planned switch is a values file layered on its instance at a scheduled
+      # change: deploy/woow-k3s/planned/<instance>/<change>.yaml. It is not an
+      # instance itself (the loops above never see it), so render it here.
+      - name: Every planned switch renders on top of its instance
+        run: |
+          mkdir -p /tmp/tp
+          fail=0
+          for f in deploy/woow-k3s/planned/*/*.yaml; do
+            [ -e "$f" ] || continue
+            inst=$(basename "$(dirname "$f")"); out="/tmp/tp/$inst-$(basename "$f")"
+            if [ ! -f "deploy/woow-k3s/$inst.yaml" ]; then
+              echo "::error file=$f::no instance deploy/woow-k3s/$inst.yaml for this planned switch"; fail=1; continue
+            fi
+            if ! helm template odoo-tenant charts/odoo-tenant -n "$inst" -f "deploy/woow-k3s/$inst.yaml" -f "$f" \
+                 --set-string pgPassword=dummy > "$out" 2>"$out.err"; then
+              echo "::error file=$f::does not render on $inst"; sed 's/^/    /' "$out.err"; fail=1; continue
+            fi
+            if grep -q '__PGPASSWORD__' "$out"; then echo "::error file=$f::__PGPASSWORD__ survived rendering"; fail=1; fi
+            echo "  $f: $(grep -c '^kind: ' "$out") objects"
+          done
+          [ "$fail" -eq 0 ] || exit 1
+
+      # What the separate cron Deployment (odoo.cron) is for, checked on every
+      # planned switch that turns it on: the cron pod is invisible to the web
+      # Service, the two pods are always scheduled together (ReadWriteOnce data),
+      # and each component's Secret-backed variables reach only that component.
+      - name: Cron split keeps the pods together and the keys apart
+        run: |
+          python3 - <<'EOF'
+          import glob, os, sys, yaml
+          def load(p): return yaml.safe_load(open(p)) or {}
+          def matches(sel, labels):
+              for k, v in (sel.get("matchLabels") or {}).items():
+                  if labels.get(k) != v: return False
+              for e in sel.get("matchExpressions") or []:
+                  if e["operator"] != "In" or labels.get(e["key"]) not in e["values"]: return False
+              return True
+          def merged_secret_env(inst, plan):
+              se = dict((inst.get("odoo") or {}).get("secretEnv") or {})
+              se.update((plan.get("odoo") or {}).get("secretEnv") or {})
+              return {g: {e["name"] for e in (se.get(g) or [])} for g in ("both", "web", "cron")}
+          bad, checked = [], 0
+          for f in sorted(glob.glob("deploy/woow-k3s/planned/*/*.yaml")):
+              inst_name = os.path.basename(os.path.dirname(f))
+              docs = [d for d in yaml.safe_load_all(open(f"/tmp/tp/{inst_name}-{os.path.basename(f)}")) if d]
+              deps = [d for d in docs if d["kind"] == "Deployment"]
+              crons = [d for d in deps if d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/component") == "cron"]
+              if not crons: continue
+              checked += 1
+              def err(m): bad.append(f"{f}: {m}")
+              if len(crons) != 1: err(f"{len(crons)} cron Deployments"); continue
+              cron = crons[0]; cs = cron["spec"]["template"]["spec"]
+              cron_labels = cron["spec"]["template"]["metadata"]["labels"]
+              aff = cs["affinity"]["podAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+              if len(aff) != 1 or aff[0]["topologyKey"] != "kubernetes.io/hostname": err("cron pod affinity is not one required term on kubernetes.io/hostname")
+              webs = [d for d in deps if d is not cron and d["spec"]["selector"]["matchLabels"] == aff[0]["labelSelector"].get("matchLabels")]
+              if len(webs) != 1: err("the cron pod's affinity does not select exactly the web Deployment's pods"); continue
+              web = webs[0]; ws = web["spec"]["template"]["spec"]
+              web_labels = web["spec"]["template"]["metadata"]["labels"]
+              for s in (d for d in docs if d["kind"] == "Service"):
+                  sel = s["spec"].get("selector") or {}
+                  if sel and all(cron_labels.get(k) == v for k, v in sel.items()):
+                      err(f"Service {s['metadata']['name']} selects the cron pod")
+              if matches(cron["spec"]["selector"], web_labels): err("the cron Deployment's selector matches the web pod")
+              wa = ((ws.get("affinity") or {}).get("podAffinity") or {}).get("requiredDuringSchedulingIgnoredDuringExecution") or []
+              if len(wa) != 1 or wa[0]["topologyKey"] != "kubernetes.io/hostname" \
+                 or not matches(wa[0]["labelSelector"], web_labels) or not matches(wa[0]["labelSelector"], cron_labels):
+                  err("the web pod lacks the required co-location term matching both itself and the cron pod")
+              for d in (web, cron):
+                  if d["spec"]["strategy"]["type"] != "Recreate": err(f"{d['metadata']['name']} is not Recreate")
+              wc = ws["containers"][0]; cc = cs["containers"][0]
+              if "--max-cron-threads=0" not in " ".join(wc.get("command") or []): err("the web command lacks --max-cron-threads=0")
+              if "--workers=0" not in (cc.get("command") or []): err("the cron command lacks --workers=0")
+              se = merged_secret_env(load(f"deploy/woow-k3s/{inst_name}.yaml"), load(f))
+              all_se = se["both"] | se["web"] | se["cron"]
+              for name, c, want, never in (("web", wc, se["both"] | se["web"], se["cron"]),
+                                           ("cron", cc, se["both"] | se["cron"], se["web"])):
+                  env = {e["name"]: e for e in c.get("env") or []}
+                  for n in sorted(want - env.keys()): err(f"{name} container is missing {n}")
+                  for n in sorted(never & env.keys()): err(f"{name} container must not get {n}")
+                  for n in sorted(all_se & env.keys()):
+                      if "value" in env[n] or "secretKeyRef" not in (env[n].get("valueFrom") or {}):
+                          err(f"{name} container: {n} is not a secretKeyRef")
+              wv = {v["name"]: v for v in ws.get("volumes") or []}
+              for v in cs.get("volumes") or []:
+                  if wv.get(v["name"]) != v: err(f"cron volume {v['name']} differs from the web's")
+              for m in wc.get("volumeMounts") or []:
+                  if m not in (cc.get("volumeMounts") or []): err(f"cron container does not mount {m['mountPath']} like the web")
+          if bad: sys.exit("\n".join(bad))
+          print(f"cron split checked on {checked} planned switch(es)")
+          EOF
+
+      - name: Cron split guards fire
+        run: |
+          base="-f deploy/woow-k3s/apun.yaml -f deploy/woow-k3s/planned/apun/cron-split.yaml"
+          fail=0
+          expect_fail() {  # <message substring> <helm template args...>
+            msg=$1; shift
+            if out=$(helm template odoo-tenant charts/odoo-tenant -n apun "$@" 2>&1); then
+              echo "::error::rendered although it must be refused: $*"; fail=1; return
+            fi
+            if echo "$out" | grep -qF -- "$msg"; then echo "  refused: $msg"
+            else echo "::error::wrong failure for $*: $out"; fail=1; fi
+          }
+          # The web would keep running cron jobs that need the cron-only key.
+          expect_fail "must pass --max-cron-threads=0" $base \
+            --set-json 'odoo.command=["bash","-c","exec odoo --config=/etc/odoo/odoo.conf\n"]'
+          # Cron-only variables with no cron pod to receive them.
+          expect_fail "odoo.secretEnv.cron is set but odoo.cron.enabled is false" -f deploy/woow-k3s/apun.yaml \
+            --set-json 'odoo.secretEnv.cron=[{"name":"X","secretName":"s","key":"k"}]'
+          # A literal value can never ride along in secretEnv.
+          expect_fail 'unknown field "value"' $base \
+            --set-json 'odoo.secretEnv.web=[{"name":"X","secretName":"s","key":"k","value":"literal"}]'
+          # A second definition of a name would silently win.
+          expect_fail "HOST is already set by odoo.env" $base \
+            --set-json 'odoo.secretEnv.both=[{"name":"HOST","secretName":"s","key":"k"}]'
+          # 3 threads x (LISTEN + cron_cr + job_cr) does not fit in 8.
+          expect_fail "< 3 x odoo.cron.maxCronThreads" $base --set odoo.cron.dbMaxconn=8
+          expect_fail "must be 0 or 1" $base --set odoo.cron.replicas=2
+          [ "$fail" -eq 0 ] || exit 1
+
       - name: kubeconform (schema validation)
         run: |
           curl -sSLo /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz
           echo "${KUBECONFORM_SHA256}  /tmp/kc.tgz" | sha256sum -c -
           tar -xzf /tmp/kc.tgz -C /usr/local/bin kubeconform
           kubeconform -strict -summary /tmp/t/*.yaml
+          kubeconform -strict -summary /tmp/tp/*.yaml
 
       - name: "-n controls object placement"
         run: |
