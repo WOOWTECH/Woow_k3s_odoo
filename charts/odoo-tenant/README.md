@@ -254,7 +254,11 @@ To remove the split on purpose, either `helm rollback` to a revision from
 before the split (rollback does not render templates; scale the cron
 Deployment to 0 first), or scale the cron Deployment to 0, delete it, and
 upgrade with values that turn the split off and drop `--max-cron-threads=0`
-from the web command.
+from the web command. A rollback also brings back that revision's image, and
+an older image on a database whose modules were upgraded since is not a
+supported state: restore the database first (for apun, whose revisions
+before the split all predate such an upgrade, see "Rollback" in
+[`docs/apun-image-change/`](../../docs/apun-image-change/README.md)).
 
 Verified 2026-11-17 in `dev-sandbox-*` namespaces on woow-k3s (three
 schedulable nodes, a Longhorn RWO volume shared by both pods, then stock Odoo

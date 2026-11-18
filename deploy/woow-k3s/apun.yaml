@@ -31,10 +31,18 @@
 # image change follows docs/apun-image-change/README.md, which runs the
 # one-off `-u` Job BEFORE the helm upgrade.
 #
-# Removing the split (helm rollback to revision 13 or older): first delete the
-# NetworkPolicy apun-odoo-to-newapi-apporo-egress (a web pod without the four
-# WOOW_LLM_EXTRA_* variables must not reach the New API proxy), scale
-# apun-odoo-cron to 0, then roll back.
+# Do not take the split out with a rollback. Every revision up to 13 runs
+# without it, but also runs an image older than the database: revision 14's
+# one-off -u Job upgraded the platform modules for the AI models. A rollback
+# to one of them is valid only together with restoring the database from
+# before revision 14, which loses everything written since (see "Rollback" in
+# docs/apun-image-change/README.md); before it, delete the NetworkPolicy
+# apun-odoo-to-newapi-apporo-egress (a web pod without the four
+# WOOW_LLM_EXTRA_* variables must not reach the New API proxy) and scale
+# apun-odoo-cron to 0. Taking the split out on the current image is a values
+# change of its own (chart README, "Separate cron Deployment"): the web pod
+# would run the scheduled jobs again, and need the cron-only key that the
+# split keeps out of it.
 
 tenant: apun
 

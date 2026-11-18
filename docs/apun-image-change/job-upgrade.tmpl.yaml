@@ -26,7 +26,7 @@ spec:
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
-      # A node the image was pulled onto in step 3.
+      # A node the image was pulled onto in step 1.
       nodeSelector:
         kubernetes.io/hostname: __NODE__
       securityContext:

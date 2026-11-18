@@ -1,5 +1,9 @@
-# Rollback, restore B of README.md only (Odoo at 0, an empty `odoo` database
-# created first): restores step 2's dump after checking its sha256.
+# Rollback, restore B of README.md (Odoo at 0, an empty `odoo` database
+# created first): restores step 2's dump after checking its sha256. The
+# README also fills it to read rollback R2's copy into a database of its own.
+# No nodeSelector, so that a rollback does not depend on the node Odoo ran
+# on: the backup volume attaches wherever the Job runs (the nightly CronJob
+# has none either).
 # Success is "pg_restore exit code 0". On exit code 1 read the log: errors
 # about COMMENT ON EXTENSION alone are harmless, anything else means restore A.
 apiVersion: batch/v1
@@ -22,8 +26,6 @@ spec:
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
-      nodeSelector:
-        kubernetes.io/hostname: __NODE__
       containers:
       - name: restore
         image: postgres:17-alpine

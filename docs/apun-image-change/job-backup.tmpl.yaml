@@ -1,6 +1,8 @@
 # Step 2 of README.md, before the window: an online pg_dump of the database
 # into /backups/keep on the backup volume (the nightly CronJob prunes only
 # /backups/odoo_*.pg, so the dump stays), with its sha256 and table count.
+# Rollback R2 fills it again, with __STAMP__ = <stamp>-failed, for a copy of
+# the database as the new image left it.
 # Not near 03:30 UTC: the nightly backup uses the same ReadWriteOnce volume.
 apiVersion: batch/v1
 kind: Job

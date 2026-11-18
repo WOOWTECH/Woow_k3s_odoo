@@ -546,7 +546,9 @@ jobs:
       - name: apun runbook manifests match the release
         run: |
           mkdir -p /tmp/rb
-          python3 -m py_compile docs/apun-image-change/module_check.py
+          # A syntax check that writes no __pycache__ into the checkout.
+          python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' \
+            docs/apun-image-change/module_check.py
           python3 - <<'EOF'
           import glob, os, re, sys, yaml
           D = "docs/apun-image-change"
@@ -604,6 +606,12 @@ jobs:
               spec = pod_spec(docs[name])
               if refs(spec, spec["containers"][0]).get("/backups") != nightly:
                   bad.append(f"{D}/{name}: /backups must be {nightly}, the nightly backup's volume")
+          # Rollback R2 reads its copy by turning the restore's `-d odoo ` into
+          # `-d odoo_failed_<stamp> ` with sed on the file: exactly one line may
+          # match, the pg_restore one.
+          hits = [l for l in open(f"{D}/job-restore.tmpl.yaml").read().splitlines() if "-d odoo " in l]
+          if len(hits) != 1 or "pg_restore" not in hits[0]:
+              bad.append(f"{D}/job-restore.tmpl.yaml: `-d odoo ` must be on the pg_restore line only (README.md, Rollback R2)")
           if bad: sys.exit("\n".join(bad))
           print(f"{len(docs)} runbook templates match deploy/woow-k3s/apun.yaml")
           EOF

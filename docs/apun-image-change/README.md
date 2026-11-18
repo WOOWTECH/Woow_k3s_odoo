@@ -6,9 +6,9 @@ couple of minutes: on 2026-11-18 the stop took 2 min 7 s, of which the module
 upgrade was 32 s. Everything that can run before the stop does.
 
 The steps are those of the image changes of 2026-11-18 (helm revisions 14 and
-15), written for reuse. The manifests are templates next to this file; their
-placeholders (`__IMAGE__`, `__NODE__`, `__STAMP__`, ...) are filled by the
-`fill` function below.
+15), written for reuse; only step 1's check pod is new (see there). The
+manifests are templates next to this file; their placeholders (`__IMAGE__`,
+`__NODE__`, `__STAMP__`, ...) are filled by the `fill` function below.
 
 ## Why apun needs a runbook
 
@@ -53,21 +53,15 @@ placeholders (`__IMAGE__`, `__NODE__`, `__STAMP__`, ...) are filled by the
   restarts or scales apun's pods on its own (monitoring scripts) until the
   end.
 
-Set up a shell in the repository checkout of that branch:
+Set up a shell in the repository checkout of that branch. First the
+definitions; run them in every shell you use for this change:
 
 ```sh
-K="kubectl --context woow-k3s -n apun"
-L="kubectl --context woow-k3s -n longhorn-system"
-H="helm --kube-context woow-k3s -n apun"
+KC="kubectl --context woow-k3s"   # plus whatever connection flags your kubeconfig needs
+K="$KC -n apun"
+L="$KC -n longhorn-system"
+H="helm --kube-context woow-k3s -n apun"   # the same flags, in helm's spelling
 D=docs/apun-image-change
-IMAGE='ghcr.io/woowtech/apporo-odoo:<tag>@sha256:<digest>'   # = odoo.image in apun.yaml
-STAMP=<yyyymmdd><letter>        # e.g. 20261118b: names the one-off objects and the dump
-NODE=$($K get pod -l app.kubernetes.io/name=apun,app.kubernetes.io/component=application \
-  -o jsonpath='{.items[0].spec.nodeName}')                     # where Odoo runs now
-DB_PV=$($K get pvc apun-db-pvc -o jsonpath='{.spec.volumeName}')
-FS_PV=$($K get pvc apun-filestore-pvc -o jsonpath='{.spec.volumeName}')
-W=~/apun-image-$STAMP; mkdir -p "$W"; chmod 700 "$W"           # logs and filled manifests
-MODULES=
 fill() {  # fill <template> [sed -e expressions, applied first]: prints the manifest
   t=$1; shift
   sed "$@" -e "s|__IMAGE__|$IMAGE|g" -e "s|__NODE__|$NODE|g" -e "s|__STAMP__|$STAMP|g" \
@@ -81,6 +75,26 @@ job_wait() {  # job_wait <job>: returns 0 once it succeeded, 1 once it failed
     sleep 3
   done
 }
+```
+
+Then this change's values, once. They are saved to `$W/env`: a later shell
+runs the definitions, then `. ~/apun-image-<STAMP>/env` instead of this block
+(once Odoo is stopped there is no web pod left to read the node from).
+
+```sh
+IMAGE='ghcr.io/woowtech/apporo-odoo:<tag>@sha256:<digest>'   # = odoo.image in apun.yaml
+STAMP=<yyyymmdd><letter>        # e.g. 20261118b: names the one-off objects and the dump
+W=~/apun-image-$STAMP; mkdir -p "$W"; chmod 700 "$W"           # logs, filled manifests, env
+NODE=$($K get pod -l app.kubernetes.io/name=apun,app.kubernetes.io/component=application \
+  -o jsonpath='{.items[0].spec.nodeName}')                     # where Odoo runs now
+DB_PV=$($K get pvc apun-db-pvc -o jsonpath='{.spec.volumeName}')
+FS_PV=$($K get pvc apun-filestore-pvc -o jsonpath='{.spec.volumeName}')
+MODULES=
+if [ -z "$NODE" ] || [ -z "$DB_PV" ] || [ -z "$FS_PV" ]; then echo "MISSING: NODE, DB_PV or FS_PV is empty"
+elif [ -e "$W/env" ]; then echo "$W/env exists: source it instead of setting the values again"
+else printf "%s='%s'\n" IMAGE "$IMAGE" STAMP "$STAMP" W "$W" NODE "$NODE" \
+  DB_PV "$DB_PV" FS_PV "$FS_PV" MODULES "$MODULES" > "$W/env" && echo "values saved to $W/env"
+fi
 grep -qF "image: $IMAGE" deploy/woow-k3s/apun.yaml && echo "IMAGE is the pin" || echo "IMAGE IS NOT THE PIN IN apun.yaml"
 ```
 
@@ -94,6 +108,12 @@ apun's `odoo.conf` and the data volume mounted read-only.
 version on the addons path (resolved the way the server resolves it) with the
 version the database was last upgraded to. It is read-only.
 
+The check pod is new with this runbook: on 2026-11-18 a pod only pulled the
+image, and the modules were picked by hand. `module_check.py` itself has run
+in the live web and cron pods. Watch the check pod's first use: that it
+mounts the data volume next to the running pods, and that the check reaches
+the database.
+
 ```sh
 fill check.tmpl.yaml > "$W/check.yaml" && $K apply -f "$W/check.yaml"
 $K wait --for=condition=Ready pod/apun-image-check-$STAMP --timeout=60m   # = the pull
@@ -102,25 +122,29 @@ $K delete pod apun-image-check-$STAMP     # it holds the data volume
 ```
 
 Each `UPGRADE <module>: database <old> -> files <new> (<path>)` line is a
-module to upgrade, and the last line, `MODULES=...`, lists them all. Read
-the list before you use it:
+module of the image to upgrade, and the last line, `MODULES=...`, lists them.
+Read the output before you use it:
 
-- A module whose path is `/var/lib/odoo/addons` lives on the data volume, not
-  in the image. Listed, it was changed on the volume without an upgrade,
-  which is not part of this change: ask whoever changed it before adding it.
-  On 2026-11-18 that was `apporo_relay_oauth` (files 18.0.1.2.0, database
-  18.0.1.0.0; a routes-only change whose upgrade was skipped on purpose).
+- A `VOLUME` line is a module whose files lie on the data volume
+  (`/var/lib/odoo`), not in the image. `DATA_VOLUME_ONLY=...`, the line
+  before the last, lists them, and `MODULES` leaves them out. Such a module
+  was changed on the volume without an upgrade, which is not part of this
+  change: ask whoever changed it before adding it. On 2026-11-18 that was
+  `apporo_relay_oauth` (files 18.0.1.2.0, database 18.0.1.0.0; a routes-only
+  change whose upgrade was skipped on purpose).
 - A `CHECK` line (a module left in `to upgrade`, or installed but not on the
   addons path) must be understood before going on.
 - A module whose XML data or views changed without a version bump also needs
   `-u`; the image's pull request says which modules changed.
 
 ```sh
-MODULES=<the image's modules from the list, comma-separated>
+MODULES=<the MODULES= list, plus any module the pull request names>
+echo "MODULES='$MODULES'" >> "$W/env"
 ```
 
 With nothing to upgrade (an empty list, and no data or views changed), step 6
-is skipped; every other step stays.
+is skipped, and so are the upgrade Job's lines in step 3; every other step
+stays.
 
 Then pull the image onto every other node the web pod may be scheduled on (the
 label in apun.yaml's `odoo.nodeSelector`): the scheduler may place the new web
@@ -128,7 +152,7 @@ pod on any of them, the cron pod follows it, and a pull inside the window
 would add its duration to the outage.
 
 ```sh
-for n in $(kubectl --context woow-k3s get nodes -l node-role.kubernetes.io/control-plane=true \
+for n in $($KC get nodes -l node-role.kubernetes.io/control-plane=true \
     -o jsonpath='{.items[*].metadata.name}'); do
   [ "$n" = "$NODE" ] || fill prepull.tmpl.yaml -e "s|__NODE__|$n|g" | $K apply -f -
 done
@@ -162,13 +186,21 @@ helm template odoo-tenant charts/odoo-tenant -n apun -f deploy/woow-k3s/apun.yam
 $H get manifest odoo-tenant > "$W/live.yaml"
 diff "$W/live.yaml" "$W/render.yaml"   # only the odoo `image:` lines of apun-odoo and
                                        # apun-odoo-cron, and an empty last line
-fill job-upgrade.tmpl.yaml > "$W/job-upgrade.yaml"     # with MODULES from step 1
 fill snapshot.tmpl.yaml -e "s|__PART__|db|g" -e "s|__VOLUME__|$DB_PV|g" > "$W/snap-db.yaml"
 fill snapshot.tmpl.yaml -e "s|__PART__|fs|g" -e "s|__VOLUME__|$FS_PV|g" > "$W/snap-fs.yaml"
-grep -n '__[A-Z]*__\|"-u", ""' "$W"/job-upgrade.yaml "$W"/snap-*.yaml    # expect no output
-$K apply --dry-run=server -f "$W/job-upgrade.yaml"
+grep -n '__[A-Z]*__' "$W"/snap-*.yaml    # expect no output
 $L apply --dry-run=server -f "$W/snap-db.yaml" -f "$W/snap-fs.yaml"
-$H history odoo-tenant --max 1    # write down this revision: the one to roll back to
+# the revision a rollback goes back to:
+REVISION=$($H history odoo-tenant --max 1 -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["revision"])')
+echo "REVISION='$REVISION'" >> "$W/env"; echo "rollback revision: $REVISION"
+```
+
+Unless `MODULES` is empty (no step 6 then):
+
+```sh
+fill job-upgrade.tmpl.yaml > "$W/job-upgrade.yaml"
+grep -n '__[A-Z]*__\|"-u", ""' "$W/job-upgrade.yaml"    # expect no output
+$K apply --dry-run=server -f "$W/job-upgrade.yaml"
 ```
 
 ## The window
@@ -176,16 +208,26 @@ $H history odoo-tenant --max 1    # write down this revision: the one to roll ba
 ### 4. Stop Odoo, cron first
 
 ```sh
-date +%T | tee "$W/t-stop"
-$K scale deploy/apun-odoo-cron --replicas=0
-while [ -n "$($K get pod -l app.kubernetes.io/name=apun,app.kubernetes.io/component=cron -o name)" ]; do sleep 2; done
-$K scale deploy/apun-odoo --replicas=0
-while [ -n "$($K get pod -l app.kubernetes.io/name=apun,app.kubernetes.io/component=application -o name)" ]; do sleep 2; done
-# nothing may still run with the data volume mounted (expect no output):
-$K get pod --field-selector=status.phase=Running \
-  -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.volumes[*].persistentVolumeClaim.claimName}{"\n"}{end}' \
-  | grep apun-filestore-pvc
+date '+%F %T %z' | tee "$W/t-stop"
 ```
+
+```sh
+$K scale deploy/apun-odoo-cron --replicas=0
+until out=$($K get pod -l app.kubernetes.io/name=apun,app.kubernetes.io/component=cron -o name) &&
+  [ -z "$out" ]; do sleep 2; done
+$K scale deploy/apun-odoo --replicas=0
+until out=$($K get pod -l app.kubernetes.io/name=apun,app.kubernetes.io/component=application -o name) &&
+  [ -z "$out" ]; do sleep 2; done
+# nothing else may hold or wait for the data volume (expect "data volume free"):
+if out=$($K get pod --field-selector='status.phase!=Succeeded,status.phase!=Failed' \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.volumes[*].persistentVolumeClaim.claimName}{"\n"}{end}')
+then printf '%s\n' "$out" | grep apun-filestore-pvc || echo "data volume free"
+else echo "kubectl failed: run the check again"
+fi
+```
+
+A failed `kubectl` call never ends a wait: a loop only ends on an empty
+answer from a call that succeeded.
 
 ### 5. Longhorn snapshots
 
@@ -225,7 +267,7 @@ A failed Job: rollback R1 below. Do not run `helm upgrade`.
 $H upgrade odoo-tenant charts/odoo-tenant -f deploy/woow-k3s/apun.yaml
 $K rollout status deploy/apun-odoo --timeout=20m
 $K rollout status deploy/apun-odoo-cron --timeout=20m
-date +%T | tee "$W/t-start"
+date '+%F %T %z' | tee "$W/t-start"
 ```
 
 The upgrade sets both Deployments back to 1 replica. The web pod schedules
@@ -256,7 +298,7 @@ done
 $K exec deploy/apun-odoo -c odoo -- cat /proc/1/cmdline | tr '\0' ' '; echo
 #   ends in --max-cron-threads=0
 $K exec deploy/apun-odoo -c odoo -- python3 -I -c "$(cat $D/module_check.py)"
-#   no UPGRADE line for a module of the image
+#   MODULES= is empty (a VOLUME line is not the image's)
 ```
 
 Then, five to ten minutes after the start:
@@ -288,40 +330,103 @@ Last, log in with a test account and open the pages the change is about.
 ## Rollback
 
 The old image on an upgraded database is not a supported state: **restore the
-database first**, then start the old image. Neither restore path had to be
-used on apun as of 2026-11-18.
+database first**, then start the old image. Neither restore path has been run
+on apun as of 2026-11-18.
+
+In a new shell, run step 0's definitions, then `. ~/apun-image-<STAMP>/env`
+(not step 0's values block: with Odoo stopped it finds no node).
 
 **R1 - the `-u` Job failed (no `helm upgrade` yet).** Both Deployments are at
-0 and still on the old image. Keep `upgrade.log`. Restore the database (A or
-B), then start web, then cron:
+0 and still on the old image, and since the snapshots of step 5 only the
+failed Job has written. Keep `upgrade.log`. Restore the database (A, or B),
+then start web, then cron:
 
 ```sh
 $K scale deploy/apun-odoo --replicas=1 && $K rollout status deploy/apun-odoo --timeout=20m
 $K scale deploy/apun-odoo-cron --replicas=1
 ```
 
-**R2 - the new image misbehaves after `helm upgrade`.** Stop as in step 4
-(cron first), restore the database (A or B), then roll back to the revision
-written down in step 3; that sets both Deployments back to 1 on the old image:
+**R2 - the new image misbehaves after `helm upgrade`.** From `$W/t-start` on,
+the new image has served the site and run the scheduled jobs: sign-ups,
+orders, payments and invoices, wallet points, AI credit conversions, and the
+New API accounts, keys and top-ups that go with them. **Both restore paths
+drop all of that**, and New API is not rolled back with Odoo: the top-ups it
+applied and the accounts and keys it created stay. Worse, the old image's
+scheduled jobs act on the restored state: a credit order that was still
+waiting to be sent at the stop, and has been sent since, would be sent again.
+So once the site has served for a while, fixing forward (a corrected image,
+through this runbook again) is usually the better choice. Roll back only for
+a problem that cannot wait for one, agreed with the site owner.
+
+1. Pause again what step 0 paused. Stop: `date '+%F %T %z' | tee
+   "$W/t-r2-stop"`, then step 4's second block.
+2. Before anything is restored, dump the database as the new image left it,
+   to `/backups/keep/odoo_pre-$STAMP-failed.pg`. Step 5 reconciles from this
+   copy; after restore A it is the only one.
+
+   ```sh
+   fill job-backup.tmpl.yaml -e "s|__STAMP__|$STAMP-failed|g" > "$W/job-backup-failed.yaml"
+   $K apply -f "$W/job-backup-failed.yaml"
+   job_wait apun-image-backup-$STAMP-failed && echo succeeded
+   $K logs job/apun-image-backup-$STAMP-failed | tee "$W/backup-failed.log"
+   ```
+
+3. Restore A, both volumes: database and files are then of one moment (the
+   new image may have removed files the old database refers to; files added
+   since `$W/t-start` go with the revert). B only if A is not possible: it
+   also drops what was written between the dump and `$W/t-stop`, and leaves
+   the files as the new image left them.
+4. Roll back to the revision saved in step 3, and stop the cron pod at once,
+   before its first run: it stays at 0 until step 5 is done.
+
+   ```sh
+   $H rollback odoo-tenant "$REVISION" && $K scale deploy/apun-odoo-cron --replicas=0
+   $K rollout status deploy/apun-odoo --timeout=20m
+   $K exec deploy/apun-postgres -- psql -U woow-odoo -d odoo -Atc \
+     "select max(lastcall) at time zone 'UTC' from ir_cron"
+   #   not later than $W/t-stop: the cron pod did not run (if it did, step 5
+   #   covers that run too)
+   ```
+
+5. Reconcile what the restore dropped, with the site owner: everything
+   written after `$W/t-start` (with B, also between the dump and
+   `$W/t-stop`). Odoo's side is in the copy of step 2 (after restore A, read
+   it as below; with B, also in `odoo_failed_$STAMP`): new accounts, orders,
+   payments and invoices, wallet points, LLMC credit orders and their
+   top-ups. New API's side is on New API: the users, keys and top-ups since
+   `$W/t-start`. Each goes back in by hand, or is undone where it was
+   applied. Settle two kinds first, while the cron pod is at 0: a credit
+   order that the restored database still has waiting or in flight and the
+   copy shows credited (the cron would send it again), and an account the
+   copy shows provisioned on New API that the restored database does not
+   (the cron would try to provision it again). Then start the cron pod:
+   `$K scale deploy/apun-odoo-cron --replicas=1`.
+6. Close the pull request (or revert it if it was merged).
+
+To read the copy after restore A, restore it into a database of its own, made
+like restore B's empty one (`$P` as defined there; no rename):
 
 ```sh
-$H rollback odoo-tenant <revision from step 3>
-$K rollout status deploy/apun-odoo --timeout=20m
+$P "create database odoo_failed_$STAMP owner \"woow-odoo\" encoding '<enc>' lc_collate '<collate>' lc_ctype '<ctype>' template template0"
+fill job-restore.tmpl.yaml -e "s|__STAMP__|$STAMP-failed|g" \
+  -e "s|-d odoo |-d odoo_failed_$STAMP |" > "$W/job-restore-failed.yaml"
+if grep -q -- "-d odoo_failed_$STAMP " "$W/job-restore-failed.yaml"; then
+  $K apply -f "$W/job-restore-failed.yaml"
+  job_wait apun-image-restore-$STAMP-failed; $K logs job/apun-image-restore-$STAMP-failed | tail -5
+else echo "NOT APPLIED: the Job would restore into odoo itself"
+fi
 ```
 
-Close the pull request (or revert it if it was merged).
-
-**Restore A - Longhorn snapshot (exact state at the stop; preferred).**
+**Restore A - Longhorn snapshots (the state at the stop of step 4;
+preferred).** A revert drops every write after the snapshot: in R1 only the
+failed Job's, in R2 everything the new image wrote (R2 step 2 keeps a copy).
 
 1. `$K scale deploy/apun-postgres --replicas=0` and wait for its pod to go.
 2. Longhorn UI, volume `$DB_PV`: Attach with Maintenance mode, Snapshots,
    `apun-db-pre-$STAMP`, Revert, Detach.
-3. Only if the files must go back too: the same for `$FS_PV` and
-   `apun-fs-pre-$STAMP` (both Odoo Deployments at 0).
+3. The files: in R2 always, in R1 only if they must go back too. The same for
+   `$FS_PV` and `apun-fs-pre-$STAMP` (both Odoo Deployments at 0).
 4. `$K scale deploy/apun-postgres --replicas=1` and wait until it is ready.
-
-A revert drops every write after the snapshot, which is what is wanted: Odoo
-was stopped.
 
 **Restore B - the online dump (misses the writes after the dump).** Keep the
 failed database under another name, create an empty one like it, restore:
@@ -339,8 +444,8 @@ job_wait apun-image-restore-$STAMP; $K logs job/apun-image-restore-$STAMP | tee 
 
 Before dropping `odoo_failed_$STAMP`, find what it holds that the dump does
 not: orders, payments, invoices and AI credit conversions written after the
-dump.
+dump (in R2, step 5).
 
-The data volume rarely needs restoring: an upgrade adds files, and files the
-restored database no longer references are removed by Odoo's own garbage
-collection.
+In R1 the data volume rarely needs restoring: the `-u` Job adds files, and
+files the restored database no longer references are removed by Odoo's own
+garbage collection. In R2 restore A reverts it too (R2 step 3).
