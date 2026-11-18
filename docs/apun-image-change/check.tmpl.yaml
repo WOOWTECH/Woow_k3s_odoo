@@ -18,6 +18,9 @@ spec:
   activeDeadlineSeconds: 3600
   nodeSelector:
     kubernetes.io/hostname: __NODE__
+  # odoo.conf (a Secret, mode 0440) is readable by this group only.
+  securityContext:
+    fsGroup: 101
   containers:
   - name: odoo
     image: __IMAGE__
@@ -31,6 +34,6 @@ spec:
     - {name: odoo-filestore, mountPath: /var/lib/odoo, readOnly: true}
   volumes:
   - name: odoo-config
-    configMap: {name: apun-odoo-config}
+    secret: {secretName: apun-odoo-conf, defaultMode: 288}
   - name: odoo-filestore
     persistentVolumeClaim: {claimName: apun-filestore-pvc, readOnly: true}
