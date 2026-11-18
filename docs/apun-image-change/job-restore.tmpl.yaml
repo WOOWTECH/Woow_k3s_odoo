@@ -1,0 +1,54 @@
+# Rollback, restore B of README.md only (Odoo at 0, an empty `odoo` database
+# created first): restores step 2's dump after checking its sha256.
+# Success is "pg_restore exit code 0". On exit code 1 read the log: errors
+# about COMMENT ON EXTENSION alone are harmless, anything else means restore A.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: apun-image-restore-__STAMP__
+  namespace: apun
+  labels:
+    app.kubernetes.io/part-of: apun-image-change-__STAMP__
+    app.kubernetes.io/component: restore
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 1209600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: apun-image-change-__STAMP__
+        app.kubernetes.io/component: restore
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: __NODE__
+      containers:
+      - name: restore
+        image: postgres:17-alpine
+        imagePullPolicy: IfNotPresent
+        command: [sh, -c]
+        args:
+        - |
+          set -u
+          cd /backups/keep
+          grep " odoo_pre-__STAMP__.pg\$" "SHA256SUMS_pre-__STAMP__" | sha256sum -c - || exit 1
+          i=0
+          until pg_isready -h apun-postgres-svc -U woow-odoo -q; do
+            i=$((i+1)); [ "$i" -ge 60 ] && { echo "postgres not reachable in 60s" >&2; exit 1; }; sleep 1
+          done
+          PGPASSWORD=$POSTGRES_PASSWORD pg_restore -h apun-postgres-svc -U woow-odoo -d odoo -j 4 "odoo_pre-__STAMP__.pg"
+          rc=$?
+          echo "pg_restore exit code $rc"
+          exit $rc
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom: {secretKeyRef: {name: apun-db-secret, key: POSTGRES_PASSWORD}}
+        resources:
+          limits: {cpu: "2", memory: 1Gi}
+        volumeMounts:
+        - {name: backup, mountPath: /backups, readOnly: true}
+      volumes:
+      - name: backup
+        persistentVolumeClaim: {claimName: apun-backup-pvc}

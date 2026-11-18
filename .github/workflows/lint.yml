@@ -233,8 +233,10 @@ jobs:
           blob = re.compile(r"[A-Za-z0-9+/=]{120,}")
           bad = []
           # Recursive: a planned switch under deploy/woow-k3s/planned/ is as
-          # public as an instance file.
-          for f in sorted(glob.glob("deploy/woow-k3s/**/*.yaml", recursive=True)):
+          # public as an instance file, and so are the runbook templates under
+          # docs/.
+          for f in sorted(glob.glob("deploy/woow-k3s/**/*.yaml", recursive=True)
+                          + glob.glob("docs/**/*.yaml", recursive=True)):
               raw = open(f).read()
               for m in conn.finditer(raw):
                   if m.group(1) != "__PGPASSWORD__":
@@ -248,7 +250,7 @@ jobs:
               # A top-level `namespace:` in an instance file silently beats `-n`,
               # which is how a rehearsal once wrote into the wrong namespace.
               v = yaml.safe_load(raw) or {}
-              if "namespace" in v:
+              if f.startswith("deploy/") and "namespace" in v:
                   bad.append(f"{f}: must not set a top-level `namespace:` - it beats -n")
           # And the chart's own default must stay empty.
           if (yaml.safe_load(open("charts/odoo-tenant/values.yaml")) or {}).get("pgPassword"):
@@ -373,12 +375,14 @@ jobs:
           [ "$fail" -eq 0 ] || exit 1
 
       # What the separate cron Deployment (odoo.cron) is for, checked on every
-      # planned switch that turns it on: the cron pod is invisible to the web
-      # Service, the two pods are always scheduled together (ReadWriteOnce data),
-      # each component's Secret-backed variables reach only that component, both
-      # get the same plain env, and the cron pod, which holds the cron-only
-      # credential, takes no connections from other pods. On every planned file:
-      # an odoo.env it restates still starts with the instance file's entries.
+      # instance file and every planned switch that turns it on (apun's split
+      # lives in its instance file since it was folded in): the cron pod is
+      # invisible to the web Service, the two pods are always scheduled together
+      # (ReadWriteOnce data), each component's Secret-backed variables reach only
+      # that component, both get the same plain env, and the cron pod, which
+      # holds the cron-only credential, takes no connections from other pods. On
+      # every planned file: an odoo.env it restates still starts with the
+      # instance file's entries.
       - name: Cron split keeps the pods together and the keys apart
         run: |
           python3 - <<'EOF'
@@ -402,22 +406,29 @@ jobs:
               se = dict((inst.get("odoo") or {}).get("secretEnv") or {})
               se.update((plan.get("odoo") or {}).get("secretEnv") or {})
               return {g: {e["name"] for e in (se.get(g) or [])} for g in ("both", "web", "cron")}
-          bad, checked = [], 0
+          # (file, instance file, planned file or None, its render from the steps above)
+          targets = [(f, f, None, f"/tmp/t/{os.path.basename(f)[:-len('.yaml')]}.yaml")
+                     for f in sorted(glob.glob("deploy/woow-k3s/*.yaml"))]
           for f in sorted(glob.glob("deploy/woow-k3s/planned/*/*.yaml")):
               inst_name = os.path.basename(os.path.dirname(f))
+              targets.append((f, f"deploy/woow-k3s/{inst_name}.yaml", f, f"/tmp/tp/{inst_name}-{os.path.basename(f)}"))
+          bad, checked = [], []
+          for f, inst_file, plan_file, render in targets:
               def err(m): bad.append(f"{f}: {m}")
-              # A list in a planned file replaces the instance's list. If the
-              # instance file gains an env entry later, the restated copy must
-              # follow, or the switch would silently drop it.
-              inst_env = (load(f"deploy/woow-k3s/{inst_name}.yaml").get("odoo") or {}).get("env") or []
-              plan_env = (load(f).get("odoo") or {}).get("env")
-              if plan_env is not None and plan_env[:len(inst_env)] != inst_env:
-                  err(f"odoo.env must start with deploy/woow-k3s/{inst_name}.yaml's odoo.env, entry for entry")
-              docs = [d for d in yaml.safe_load_all(open(f"/tmp/tp/{inst_name}-{os.path.basename(f)}")) if d]
+              plan = load(plan_file) if plan_file else {}
+              if plan_file:
+                  # A list in a planned file replaces the instance's list. If the
+                  # instance file gains an env entry later, the restated copy must
+                  # follow, or the switch would silently drop it.
+                  inst_env = (load(inst_file).get("odoo") or {}).get("env") or []
+                  plan_env = (plan.get("odoo") or {}).get("env")
+                  if plan_env is not None and plan_env[:len(inst_env)] != inst_env:
+                      err(f"odoo.env must start with {inst_file}'s odoo.env, entry for entry")
+              docs = [d for d in yaml.safe_load_all(open(render)) if d]
               deps = [d for d in docs if d["kind"] == "Deployment"]
               crons = [d for d in deps if d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/component") == "cron"]
               if not crons: continue
-              checked += 1
+              checked.append(f)
               if len(crons) != 1: err(f"{len(crons)} cron Deployments"); continue
               cron = crons[0]; cs = cron["spec"]["template"]["spec"]
               cron_labels = cron["spec"]["template"]["metadata"]["labels"]
@@ -450,7 +461,7 @@ jobs:
               for p in ("startupProbe", "livenessProbe", "readinessProbe"):
                   if set(cc.get(p) or {}) & {"httpGet", "tcpSocket", "grpc"}:
                       err(f"the cron {p} connects to the pod IP, where the cron pod must not listen; use an exec probe")
-              se = merged_secret_env(load(f"deploy/woow-k3s/{inst_name}.yaml"), load(f))
+              se = merged_secret_env(load(inst_file), plan)
               all_se = se["both"] | se["web"] | se["cron"]
               plain = lambda c: [e for e in c.get("env") or [] if e["name"] not in all_se]
               if plain(wc) != plain(cc): err("the web and cron containers get different plain env; both must see odoo.env as is")
@@ -468,12 +479,13 @@ jobs:
               for m in wc.get("volumeMounts") or []:
                   if m not in (cc.get("volumeMounts") or []): err(f"cron container does not mount {m['mountPath']} like the web")
           if bad: sys.exit("\n".join(bad))
-          print(f"cron split checked on {checked} planned switch(es)")
+          print(f"cron split checked on {len(checked)} render(s): {', '.join(checked) or 'none'}")
           EOF
 
+      # apun runs the split from its instance file alone (folded in 2026-11-18).
       - name: Cron split guards fire
         run: |
-          base="-f deploy/woow-k3s/apun.yaml -f deploy/woow-k3s/planned/apun/cron-split.yaml"
+          base="-f deploy/woow-k3s/apun.yaml"
           fail=0
           expect_fail() {  # <message substring> <helm template args...>
             msg=$1; shift
@@ -504,11 +516,14 @@ jobs:
           expect_ok "exec form" $base \
             --set-json 'odoo.command=["odoo","--config=/etc/odoo/odoo.conf","--max-cron-threads","0"]'
           # Split off while the web runs no cron threads: nothing would run them.
-          expect_fail "no pod would run Odoo's scheduled jobs" -f deploy/woow-k3s/apun.yaml \
+          # (secretEnv.cron emptied, or its own guard below fires first.)
+          expect_fail "no pod would run Odoo's scheduled jobs" $base \
+            --set odoo.cron.enabled=false --set-json 'odoo.secretEnv.cron=[]' \
             --set-json 'odoo.command=["bash","-c","exec odoo --config=/etc/odoo/odoo.conf --max-cron-threads=0\n"]'
-          # Cron-only variables with no cron pod to receive them.
-          expect_fail "odoo.secretEnv.cron is set but odoo.cron.enabled is false" -f deploy/woow-k3s/apun.yaml \
-            --set-json 'odoo.secretEnv.cron=[{"name":"X","secretName":"s","key":"k"}]'
+          # Cron-only variables with no cron pod to receive them (apun.yaml's own
+          # odoo.secretEnv.cron, with the split switched off).
+          expect_fail "odoo.secretEnv.cron is set but odoo.cron.enabled is false" $base \
+            --set odoo.cron.enabled=false
           # A literal value can never ride along in secretEnv.
           expect_fail 'unknown field "value"' $base \
             --set-json 'odoo.secretEnv.web=[{"name":"X","secretName":"s","key":"k","value":"literal"}]'
@@ -520,13 +535,91 @@ jobs:
           expect_fail "must be 0 or 1" $base --set odoo.cron.replicas=2
           [ "$fail" -eq 0 ] || exit 1
 
+      # docs/apun-image-change/, the runbook every apun image change follows,
+      # starts one-off pods from templates. The module upgrade Job runs the same
+      # Odoo as the two pods, so it must carry what they carry: apun.yaml's
+      # odoo.env and odoo.secretEnv.both (never the web-only or cron-only key),
+      # the same odoo.conf and data at the same paths, the same pod
+      # securityContext. Compared with the rendered web container, so an
+      # instance file change the template does not follow fails here. The
+      # filled templates are schema-checked in the kubeconform step.
+      - name: apun runbook manifests match the release
+        run: |
+          mkdir -p /tmp/rb
+          python3 -m py_compile docs/apun-image-change/module_check.py
+          python3 - <<'EOF'
+          import glob, os, re, sys, yaml
+          D = "docs/apun-image-change"
+          IMAGE = "ghcr.io/example/odoo:tag@sha256:" + "0" * 64
+          FILL = {"__IMAGE__": IMAGE, "__NODE__": "node-1", "__STAMP__": "20990101a",
+                  "__MODULES__": "base", "__PART__": "db", "__VOLUME__": "pvc-0"}
+          bad, docs = [], {}
+          def pod_spec(d): return d["spec"]["template"]["spec"] if d["kind"] == "Job" else d["spec"]
+          def refs(spec, c):
+              # mountPath -> the ConfigMap or claim behind it
+              vols = {}
+              for v in spec.get("volumes") or []:
+                  if "configMap" in v: vols[v["name"]] = ("ConfigMap", v["configMap"]["name"])
+                  elif "persistentVolumeClaim" in v: vols[v["name"]] = ("claim", v["persistentVolumeClaim"]["claimName"])
+                  else: vols[v["name"]] = ("volume", v["name"])
+              return {m["mountPath"]: vols.get(m["name"]) for m in c.get("volumeMounts") or []}
+          for f in sorted(glob.glob(f"{D}/*.tmpl.yaml")):
+              raw = open(f).read()
+              for k, v in FILL.items(): raw = raw.replace(k, v)
+              for m in sorted(set(re.findall(r"__[A-Z]+__", raw))):
+                  bad.append(f"{f}: placeholder {m} is not one the runbook fills")
+              d = yaml.safe_load(raw)
+              docs[os.path.basename(f)] = d
+              with open(f"/tmp/rb/{os.path.basename(f)}", "w") as out: out.write(raw)
+              if d["kind"] in ("Pod", "Job"):
+                  for c in pod_spec(d)["containers"]:
+                      if c["name"] == "odoo" and c["image"] != IMAGE:
+                          bad.append(f"{f}: the odoo container must run __IMAGE__, not a fixed image")
+          rendered = [d for d in yaml.safe_load_all(open("/tmp/t/apun.yaml")) if d]
+          web = next(d for d in rendered if d["kind"] == "Deployment" and d["metadata"]["name"] == "apun-odoo")
+          ws = web["spec"]["template"]["spec"]
+          wc = next(c for c in ws["containers"] if c["name"] == "odoo")
+          inst = yaml.safe_load(open("deploy/woow-k3s/apun.yaml"))
+          web_only = {e["name"] for e in ((inst["odoo"].get("secretEnv") or {}).get("web") or [])}
+          want = {p: r for p, r in refs(ws, wc).items() if p in ("/etc/odoo", "/var/lib/odoo")}
+          if len(want) != 2:
+              bad.append("the rendered web container no longer mounts /etc/odoo and /var/lib/odoo; the runbook needs updating")
+          job = docs["job-upgrade.tmpl.yaml"]; js = pod_spec(job); jc = js["containers"][0]
+          if jc.get("env") != [e for e in wc.get("env") or [] if e["name"] not in web_only]:
+              bad.append(f"{D}/job-upgrade.tmpl.yaml: env must equal the rendered web container's env without "
+                         "odoo.secretEnv.web (apun.yaml's odoo.env, then odoo.secretEnv.both), entry for entry")
+          if js.get("securityContext") != ws.get("securityContext"):
+              bad.append(f"{D}/job-upgrade.tmpl.yaml: the pod securityContext differs from the web pod's")
+          if '"-u", "base"' not in jc["command"][-1]:
+              bad.append(f"{D}/job-upgrade.tmpl.yaml: the -u argument must be __MODULES__")
+          for name in ("job-upgrade.tmpl.yaml", "check.tmpl.yaml"):
+              spec = pod_spec(docs[name]); got = refs(spec, next(c for c in spec["containers"] if c["name"] == "odoo"))
+              for p, r in want.items():
+                  if got.get(p) != r: bad.append(f"{D}/{name}: {p} must be {r[0]} {r[1]}, like the web container")
+          # The dump and the restore use the nightly backup's volume.
+          cj = next(d for d in rendered if d["kind"] == "CronJob")
+          cjs = cj["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+          nightly = refs(cjs, cjs["containers"][0]).get("/backups")
+          for name in ("job-backup.tmpl.yaml", "job-restore.tmpl.yaml"):
+              spec = pod_spec(docs[name])
+              if refs(spec, spec["containers"][0]).get("/backups") != nightly:
+                  bad.append(f"{D}/{name}: /backups must be {nightly}, the nightly backup's volume")
+          if bad: sys.exit("\n".join(bad))
+          print(f"{len(docs)} runbook templates match deploy/woow-k3s/apun.yaml")
+          EOF
+
       - name: kubeconform (schema validation)
         run: |
           curl -sSLo /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz
           echo "${KUBECONFORM_SHA256}  /tmp/kc.tgz" | sha256sum -c -
           tar -xzf /tmp/kc.tgz -C /usr/local/bin kubeconform
           kubeconform -strict -summary /tmp/t/*.yaml
-          kubeconform -strict -summary /tmp/tp/*.yaml
+          # No planned switch is pending right now; an empty glob stays literal.
+          if ls /tmp/tp/*.yaml >/dev/null 2>&1; then
+            kubeconform -strict -summary /tmp/tp/*.yaml
+          fi
+          # The runbook's filled templates; the Longhorn Snapshot has no schema here.
+          kubeconform -strict -summary -ignore-missing-schemas /tmp/rb/*.yaml
 
       - name: "-n controls object placement"
         run: |

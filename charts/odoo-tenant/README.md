@@ -64,6 +64,13 @@ upgrade is rejected outright, not merely restarted.
 update surges a pod that waits forever for a volume the old one still holds,
 and the rollout hangs with no way to self-heal.
 
+**No upgrade gate.** A new `odoo.image` never upgrades a module: the new code
+simply starts on the database as it is. WOOW's platform Odoo chart has an
+init container for that; this chart does not. When an image brings new module
+versions, run the `-u` for them in a one-off Job with Odoo stopped, before the
+`helm upgrade`. For apun, whose image changes often, that is the runbook in
+[`docs/apun-image-change/`](../../docs/apun-image-change/README.md).
+
 **The tunnel token is a credential.** All eight adopted tenants read it from a
 Secret, which is the shape to keep. If a tenant ever carries it as a plain
 `--token` argument, the values file holds `__TUNNEL_TOKEN__` and the real value
@@ -95,7 +102,8 @@ render nothing: every tenant without them is byte-for-byte unchanged.
 
 ## Separate cron Deployment (`odoo.cron`, off by default)
 
-Every tenant runs its crons inside the web pod. `odoo.cron.enabled: true` adds
+A tenant runs its crons inside the web pod unless it turns this on (apun does,
+since 2026-11-18). `odoo.cron.enabled: true` adds
 a Deployment `<odoo name>-cron` that runs only Odoo's cron threads, so that a
 credential used only by cron jobs (`odoo.secretEnv.cron`) never sits in the
 internet-facing web pod. WOOW's platform Odoo runs the same split
@@ -229,9 +237,12 @@ may wait briefly for the volume while the deleted cron pod terminates.
 
 ### Upgrading a release that runs the split
 
-Pass the same values files the split was switched on with (the instance file
-and, until it is folded into it, the planned file). An upgrade whose values
-leave the split out - an image bump with the instance file alone, say - would
+Pass values that keep the split. A split is switched on as a planned file
+(`deploy/woow-k3s/planned/<tenant>/`) layered on the instance file, and then
+folded into the instance file; until it is folded in, pass both, the instance
+file first. apun's was folded in on 2026-11-18, so apun upgrades with
+`-f deploy/woow-k3s/apun.yaml` alone. An upgrade whose values leave the split
+out - an image bump from an instance file without it, say - would
 delete the cron Deployment, put the scheduled jobs back in the web pod, which
 lacks the cron-only Secret env, and restart the site. The chart refuses it
 while the release's cron Deployment exists, also at 0 replicas: in a

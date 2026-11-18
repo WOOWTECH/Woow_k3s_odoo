@@ -1,0 +1,36 @@
+# Step 1 of README.md, before the window: pulls the new image onto the node the
+# Odoo pods run on (__NODE__) and waits there, so that module_check.py can run
+# in it against the live database. Read-only: the config and the data volume
+# are mounted read-only, and the check opens a read-only database session.
+# It must run on that node because the data volume is ReadWriteOnce, and it
+# must be deleted before the window (it holds the data volume).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: apun-image-check-__STAMP__
+  namespace: apun
+  labels:
+    app.kubernetes.io/part-of: apun-image-change-__STAMP__
+    app.kubernetes.io/component: check
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  activeDeadlineSeconds: 3600
+  nodeSelector:
+    kubernetes.io/hostname: __NODE__
+  containers:
+  - name: odoo
+    image: __IMAGE__
+    imagePullPolicy: IfNotPresent
+    # `command` replaces the image entrypoint, which would start Odoo.
+    command: ["sleep", "3000"]
+    resources:
+      limits: {cpu: 500m, memory: 512Mi}
+    volumeMounts:
+    - {name: odoo-config, mountPath: /etc/odoo, readOnly: true}
+    - {name: odoo-filestore, mountPath: /var/lib/odoo, readOnly: true}
+  volumes:
+  - name: odoo-config
+    configMap: {name: apun-odoo-config}
+  - name: odoo-filestore
+    persistentVolumeClaim: {claimName: apun-filestore-pvc, readOnly: true}

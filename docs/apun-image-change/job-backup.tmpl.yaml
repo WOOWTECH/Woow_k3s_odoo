@@ -1,0 +1,57 @@
+# Step 2 of README.md, before the window: an online pg_dump of the database
+# into /backups/keep on the backup volume (the nightly CronJob prunes only
+# /backups/odoo_*.pg, so the dump stays), with its sha256 and table count.
+# Not near 03:30 UTC: the nightly backup uses the same ReadWriteOnce volume.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: apun-image-backup-__STAMP__
+  namespace: apun
+  labels:
+    app.kubernetes.io/part-of: apun-image-change-__STAMP__
+    app.kubernetes.io/component: backup
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 1209600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: apun-image-change-__STAMP__
+        app.kubernetes.io/component: backup
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: __NODE__
+      containers:
+      - name: backup
+        image: postgres:17-alpine
+        imagePullPolicy: IfNotPresent
+        command: [sh, -c]
+        args:
+        - |
+          set -eu
+          KEEP=/backups/keep
+          mkdir -p "$KEEP"
+          i=0
+          until pg_isready -h apun-postgres-svc -U woow-odoo -q; do
+            i=$((i+1)); [ "$i" -ge 60 ] && { echo "postgres not reachable in 60s" >&2; exit 1; }; sleep 1
+          done
+          echo "backup volume free KiB: $(df -kP /backups | awk 'NR==2 {print $4}')"
+          DB="$KEEP/odoo_pre-__STAMP__.pg"
+          PGPASSWORD=$POSTGRES_PASSWORD pg_dump -h apun-postgres-svc -U woow-odoo -d odoo -Fc -f "$DB"
+          test -s "$DB"
+          echo "dump tables: $(pg_restore --list "$DB" | grep -c 'TABLE DATA')"
+          cd "$KEEP" && sha256sum "$(basename "$DB")" | tee "SHA256SUMS_pre-__STAMP__"
+          ls -l "$DB"
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom: {secretKeyRef: {name: apun-db-secret, key: POSTGRES_PASSWORD}}
+        resources:
+          limits: {cpu: "1", memory: 512Mi}
+        volumeMounts:
+        - {name: backup, mountPath: /backups}
+      volumes:
+      - name: backup
+        persistentVolumeClaim: {claimName: apun-backup-pvc}
