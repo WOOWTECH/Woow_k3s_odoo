@@ -6,6 +6,16 @@
 # carried verbatim. Do not regenerate or 'tidy' them.
 #
 # SAFETY: never set `namespace:` here - placement is `-n` only.
+#
+# Web and cron still run in this one pod. The planned split into a web pod and
+# a cron pod is deploy/woow-k3s/planned/apun/cron-split.yaml, switched on only
+# in a scheduled outage (procedure in that file's header). Once it has been
+# switched on, and until that file is folded in here, every helm upgrade of
+# this release passes both files, in this order:
+#   -f deploy/woow-k3s/apun.yaml -f deploy/woow-k3s/planned/apun/cron-split.yaml
+# With this file alone the chart refuses the upgrade while apun-odoo-cron
+# exists, even at 0 replicas (it would delete the cron Deployment and put the
+# scheduled jobs back in the web pod).
 
 tenant: apun
 
@@ -13,6 +23,14 @@ odoo:
   containerName: odoo
   replicas: 1
   strategy: Recreate
+  # www.apporo.ai's own build (stock Odoo core + the PaaS platform modules under
+  # /opt/apporo/addons, which odoo.conf's addons_path names). Stock odoo would
+  # start without those modules and break the site. Private on ghcr: pulled via
+  # the namespace's default ServiceAccount (imagePullSecrets ghcr-pull-secret),
+  # because this chart has no odoo.imagePullSecrets. Revision 13, 2026-11-17 18:50.
+  # Other work deploys new images to apun often: compare this pin with the live
+  # Deployment right before merging or running helm upgrade, or the upgrade
+  # reverts www.apporo.ai to an older build.
   image: ghcr.io/woowtech/apporo-odoo:20261117.1040@sha256:27a4146a885343eb9b29a8f67e6a5ce414459ce1ab5ed90b19a4753c8bb8d1e2
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.

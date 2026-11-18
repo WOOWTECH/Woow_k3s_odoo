@@ -29,6 +29,23 @@ helm --kube-context woow-k3s upgrade --install odoo-tenant charts/odoo-tenant \
 Verify the render against the live objects field by field BEFORE running it.
 Every tenant in `deploy/woow-k3s/` was adopted that way with zero pod restarts.
 
+Upgrade with `-f` and the instance file, like the install. `--reuse-values`
+renders the new templates with the defaults of the chart version the release
+was made with, so a new value's default never applies; the templates read
+values added after 1.0.0 through `| default dict` so that it at least renders.
+
+## A chart change must not change a tenant by accident
+
+The instance files are transcriptions of live objects: a chart change that
+alters a tenant's render restarts or breaks that tenant at its next `helm
+upgrade`. On every pull request, CI renders each instance file the pull
+request does not touch with the base branch's chart and with the new one and
+requires byte-identical output. To change a tenant's render on purpose, change
+that tenant's file in the same pull request and say why in its header; CI then
+leaves its render to the reviewer. CI also renders every instance with the new
+templates and the base branch's `values.yaml` (what `--reuse-values` does after
+a release made with the base chart) and requires that to succeed.
+
 ## Things that will bite you
 
 **Names do not all follow the rule.** Most objects are `<tenant>-odoo`,
@@ -52,6 +69,189 @@ Secret, which is the shape to keep. If a tenant ever carries it as a plain
 `--token` argument, the values file holds `__TUNNEL_TOKEN__` and the real value
 is passed with `--set-string` at install time. CI fails if a real one is
 committed.
+
+## Environment variables from Secrets (`odoo.secretEnv`)
+
+`odoo.env` stays verbatim. Variables that come from a Secret and belong to one
+Odoo component go in `odoo.secretEnv`, which renders them as
+`valueFrom.secretKeyRef` after `odoo.env`:
+
+```yaml
+odoo:
+  secretEnv:
+    both:                 # every Odoo container: web, and cron when enabled
+      - {name: WOOW_LLM_SECRET_KEYS, secretName: apun-newapi-llm, key: fernet-keys}
+    web:                  # the web container only
+      - {name: WOOW_NEWAPI_PROXY_AUTH_WEB, secretName: apun-newapi-llm, key: proxy-auth-web}
+    cron:                 # the cron container only (needs odoo.cron.enabled)
+      - {name: WOOW_NEWAPI_PROXY_AUTH_CRON, secretName: apun-newapi-llm, key: proxy-auth-cron}
+```
+
+An entry takes `name`, `secretName`, `key` and optionally `optional` - nothing
+else, so a literal value can never be committed through these lists. A name
+that is already set in the same container is refused, and `secretEnv.cron`
+without the cron Deployment is refused (it would reach no pod). Empty lists
+render nothing: every tenant without them is byte-for-byte unchanged.
+
+## Separate cron Deployment (`odoo.cron`, off by default)
+
+Every tenant runs its crons inside the web pod. `odoo.cron.enabled: true` adds
+a Deployment `<odoo name>-cron` that runs only Odoo's cron threads, so that a
+credential used only by cron jobs (`odoo.secretEnv.cron`) never sits in the
+internet-facing web pod. WOOW's platform Odoo runs the same split
+(woow-odoo chart, `--workers=0 --max-cron-threads=3 --db_maxconn=16`).
+
+What it renders:
+
+- Same image, same `odoo.conf`, same data: the cron container mounts what the
+  web's `odoo` container mounts, and the pod gets only the `odoo.volumes`
+  entries those mounts name (the nginx sidecar's volumes stay out).
+- `odoo --config=<configPath> --workers=0 --max-cron-threads=N
+  [--db_maxconn=M] [--no-http] <extraArgs>` as the container `command` (not
+  `args`: the image entrypoint would put the database credentials from the
+  environment on the command line). Threaded mode: one process.
+- Labels: the web selector with `app.kubernetes.io/component: cron`. No
+  Service, and the web Service (component of the web) never selects it.
+- Init containers are NOT inherited (they are provisioning scripts); list what
+  the cron pod needs in `odoo.cron.initContainers`.
+
+Render-time guards (each is a configuration that would otherwise deploy and
+misbehave quietly):
+
+- The web's `odoo.command` must pass `--max-cron-threads=0` to the odoo it
+  runs, or the web keeps running cron jobs that then fail for lack of the
+  cron-only credential. Only the command's last shell segment counts (split on
+  newlines, `;`, `&&`, `||`, `|`, after joining `\`-continued lines), and in it
+  the last occurrence, as Odoo's option parser does: a flag that appears only
+  in an earlier `echo`, or `--max-cron-threads=0 --max-cron-threads=2`, is
+  refused. So is a command whose odoo is piped into another program.
+- The web selector must have `app.kubernetes.io/component` plus one more
+  label; `dbMaxconn >= 3 x maxCronThreads` (each threaded cron thread holds a
+  LISTEN connection plus `cron_cr` and `job_cr`); `replicas` 0 or 1; no
+  `httpGet` probe with `noHttp`.
+- With the split OFF: a web command that passes `--max-cron-threads=0` is
+  refused (no pod would run the scheduled jobs), and so is an install or
+  upgrade while this release still has a cron Deployment, at any replica
+  count - see "Upgrading" below. That second check uses `lookup`, so it only acts against
+  a cluster (`helm upgrade`, `--dry-run=server`); `helm template` and CI never
+  see it.
+
+**The cron pod should take no connections from other pods.** It holds the
+cron-only credential, and its Odoo HTTP server (threaded mode serves HTTP from
+the same process) answers anything that reaches it. WOOW keeps other pods out
+with NetworkPolicy. Where the namespace lets every pod reach every other one
+(apun's `default-deny-external` admits ingress from any pod in apun) an added
+policy cannot narrow that, because policies only add allows. Then bind the
+server to loopback with `extraArgs: [--http-interface=127.0.0.1]` and probe
+from inside the container with `exec` (the kubelet's `httpGet` arrives on the
+pod IP, where nothing listens any more):
+
+```yaml
+odoo:
+  cron:
+    extraArgs: [--http-interface=127.0.0.1]
+    livenessProbe:
+      exec:
+        command: [python3, -I, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/web/health', timeout=8)"]
+```
+
+`--no-http` also works but leaves nothing to probe and breaks anything that
+calls the server over loopback.
+
+**Threaded mode uses the per-worker memory limits for the whole process.**
+`limit_memory_soft` (over it the server re-executes itself) and
+`limit_memory_hard` (the process's `RLIMIT_AS`) are written for one prefork
+worker but are measured against the VMS of the single cron process. Raise them
+for the cron pod with `extraArgs` if `odoo.conf` sizes them for a worker.
+
+### The two pods and ReadWriteOnce volumes
+
+The filestore and the other data volumes are Longhorn ReadWriteOnce: attached
+to one node at a time, shareable by any number of pods on that node. So the
+two pods must always be scheduled onto the same node:
+
+- The cron pod has a required podAffinity to the web pod's node.
+- While the cron Deployment exists, the web pod has a required podAffinity to
+  "the web pod or the cron pod" (`component In [<web>, cron]`). That matters
+  for a **web-only restart**: the cron pod keeps running and keeps the volume
+  attached to its node, so a web pod placed anywhere else would hang in
+  `ContainerCreating` with `Multi-Attach error ... Volume is already used by
+  pod(s) <cron pod>`, and nothing would ever move the cron pod. The term sends
+  the new web pod to the cron pod's node instead. Because the web pod matches
+  the term itself, it still schedules when neither pod exists (the scheduler
+  admits the first pod of a self-affine group), so the two rules never
+  deadlock.
+- Both strategies are Recreate: the old pod is gone before its replacement
+  exists, so a Deployment never competes with its own previous pod.
+
+Rollout order this gives you:
+
+| What changes | What happens |
+|---|---|
+| web only | new web pod goes to the running cron pod's node |
+| cron only | new cron pod goes to the web pod's node |
+| both in one `helm upgrade` | each new pod is placed next to whichever pod of the pair exists; the cron pod waits (Pending) while no web pod does |
+| both scaled to 0, then `helm upgrade` (outage window) | web schedules first, cron follows |
+| web at 0, cron still running | the cron pod keeps running and holds the volume - see below |
+
+**Stopping Odoo now means both Deployments.** `kubectl scale --replicas=0` on
+the web alone leaves the cron pod running crons against the database and
+holding the data volume - wrong for a `-u` Job or a restore. Scale the cron
+Deployment to 0 first, then the web; bring them back with `helm upgrade`
+(which sets both) or web first, then cron.
+
+**Node failure.** Pods on a node that went away stay `Terminating` until they
+are force-deleted, and the volume stays attached to that node until then -
+the same as with a single pod. Force-delete both old pods; the replacements
+then schedule together.
+
+**The web pod can only go where the cron pod is.** If that node is cordoned,
+tainted, or short of the memory the web pod requests, a web-only restart
+(rollout, image bump, values change) leaves the new web pod `Pending` with
+`didn't match pod affinity rules`, and the site is down. Before the split the
+web pod would simply have gone to another node. Fix: scale the cron
+Deployment to 0 and wait for its pod to go, then delete the Pending web pod;
+with no pod of the pair left, its replacement schedules anywhere it fits.
+Then scale the cron Deployment back to 1 and it follows. Delete the Pending
+pod rather than wait: the scheduler retries a pod it has parked only every 5
+minutes (sandbox, 2026-11-17: 302 s without the delete, 30 s with it, of which
+about 25 s were `Multi-Attach` retries while the volume moved between nodes).
+
+**A stuck cron pod is silent.** If the cron pod is `Pending` (no room on the
+web pod's node, or the web at 0) or crash-looping, every scheduled job stops -
+mail queue, fetchmail, billing - while the site looks healthy. Watch the cron
+Deployment's available replicas and how long ago a cron last ran
+(`select now() - max(lastcall) from ir_cron where active`).
+
+**Rollback** of the switch: scale the cron Deployment to 0 first, then
+`helm rollback`. Rolling back without that still converges, but the web pod
+may wait briefly for the volume while the deleted cron pod terminates.
+
+### Upgrading a release that runs the split
+
+Pass the same values files the split was switched on with (the instance file
+and, until it is folded into it, the planned file). An upgrade whose values
+leave the split out - an image bump with the instance file alone, say - would
+delete the cron Deployment, put the scheduled jobs back in the web pod, which
+lacks the cron-only Secret env, and restart the site. The chart refuses it
+while the release's cron Deployment exists, also at 0 replicas: in a
+maintenance stop both Deployments are at 0, and that is when such an upgrade
+is most likely. `--reuse-values` keeps the split, because it reuses the values
+the release was made with.
+
+To remove the split on purpose, either `helm rollback` to a revision from
+before the split (rollback does not render templates; scale the cron
+Deployment to 0 first), or scale the cron Deployment to 0, delete it, and
+upgrade with values that turn the split off and drop `--max-cron-threads=0`
+from the web command.
+
+Verified 2026-11-17 in `dev-sandbox-*` namespaces on woow-k3s (three
+schedulable nodes, a Longhorn RWO volume shared by both pods, then stock Odoo
+18 running this rendered cron command): the co-location rules in every restart
+order; the refusal of an upgrade that would drop the cron Deployment (also
+under `--dry-run=server` and at 0 replicas), removal after deleting it, and
+`helm rollback`; `--reuse-values` from a 1.0.0 release; a loopback-only cron pod
+with exec probes. See the pull request that added this section.
 
 ## Objects this chart references but never creates
 
