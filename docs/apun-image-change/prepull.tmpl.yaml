@@ -1,0 +1,24 @@
+# Step 1 of README.md, before the window: pulls the new image onto one more
+# node the Odoo pods may be scheduled on (__NODE__ is filled per node), so
+# that no pull happens inside the window. Touches nothing else.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: apun-image-prepull-__STAMP__-__NODE__
+  namespace: apun
+  labels:
+    app.kubernetes.io/part-of: apun-image-change-__STAMP__
+    app.kubernetes.io/component: prepull
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  activeDeadlineSeconds: 7200
+  nodeSelector:
+    kubernetes.io/hostname: __NODE__
+  containers:
+  - name: odoo
+    image: __IMAGE__
+    imagePullPolicy: IfNotPresent
+    command: ["python3", "-c", "print('image ok')"]
+    resources:
+      limits: {cpu: 200m, memory: 128Mi}

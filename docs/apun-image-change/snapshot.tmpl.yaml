@@ -1,0 +1,14 @@
+# Step 5 of README.md, in the window (both Odoo Deployments at 0): a Longhorn
+# snapshot of one volume. Filled twice: __PART__=db with the Longhorn volume
+# (= PV name) behind apun-db-pvc, and __PART__=fs with the one behind
+# apun-filestore-pvc. Without createSnapshot: true no snapshot is taken.
+apiVersion: longhorn.io/v1beta2
+kind: Snapshot
+metadata:
+  name: apun-__PART__-pre-__STAMP__
+  namespace: longhorn-system
+  labels:
+    app.kubernetes.io/part-of: apun-image-change-__STAMP__
+spec:
+  volume: __VOLUME__
+  createSnapshot: true

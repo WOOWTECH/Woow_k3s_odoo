@@ -1,0 +1,93 @@
+# Step 6 of README.md, in the window (both Odoo Deployments at 0, nothing else
+# holding the data volume): the module upgrade the chart does not do.
+# __MODULES__ is the comma-separated list from step 1. Same image, odoo.conf,
+# data and env as the pods: env is apun.yaml's odoo.env plus
+# odoo.secretEnv.both, entry for entry (CI compares it with the rendered web
+# container). The four WOOW_LLM_EXTRA_* entries are required: the platform
+# rejects the Apporo New API addresses (ValidationError) in a process started
+# without them. The web-only and cron-only proxy keys are left out on purpose.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: apun-image-upgrade-__STAMP__
+  namespace: apun
+  labels:
+    app.kubernetes.io/part-of: apun-image-change-__STAMP__
+    app.kubernetes.io/component: upgrade
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 1209600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: apun-image-change-__STAMP__
+        app.kubernetes.io/component: upgrade
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      # A node the image was pulled onto in step 1.
+      nodeSelector:
+        kubernetes.io/hostname: __NODE__
+      securityContext:
+        fsGroup: 101
+      containers:
+      - name: odoo
+        image: __IMAGE__
+        imagePullPolicy: IfNotPresent
+        # `command`, not `args`: the image entrypoint would add the database
+        # credentials to the command line. Waits up to 60 s for Postgres.
+        command:
+        - python3
+        - -c
+        - |
+          import os, socket, time
+          for attempt in range(60):
+              try:
+                  socket.create_connection(("apun-postgres-svc", 5432), 2).close()
+                  break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit("Database connection unavailable")
+          os.execvp("odoo", ["odoo", "--config=/etc/odoo/odoo.conf", "-d", "odoo",
+                             "-u", "__MODULES__", "--stop-after-init", "--no-http",
+                             "--workers=0", "--max-cron-threads=0", "--log-level=info"])
+        env:
+        - name: HOST
+          value: apun-postgres-svc
+        - name: PORT
+          value: '5432'
+        - name: USER
+          valueFrom:
+            secretKeyRef:
+              key: POSTGRES_USER
+              name: apun-db-secret
+        - name: PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: POSTGRES_PASSWORD
+              name: apun-db-secret
+        - name: WOOW_LLM_EXTRA_PROXY_URLS
+          value: http://newapi-proxy.new-api-apporo.svc.cluster.local:8080
+        - name: WOOW_LLM_EXTRA_PUBLIC_BASE_URLS
+          value: https://newapi.apporo.ai/v1
+        - name: WOOW_LLM_EXTRA_CANARY_PAIRS
+          value: http://newapi-proxy.new-api-apporo.svc.cluster.local:8080=https://newapi.apporo.ai/v1
+        - name: WOOW_LLM_EXTRA_PROTECTED_NAMESPACES
+          value: new-api-apporo
+        - name: WOOW_LLM_SECRET_KEYS
+          valueFrom:
+            secretKeyRef:
+              key: fernet-keys
+              name: apun-newapi-llm
+        resources:
+          limits: {memory: 3Gi}
+        volumeMounts:
+        - {name: odoo-config, mountPath: /etc/odoo, readOnly: true}
+        - {name: odoo-filestore, mountPath: /var/lib/odoo}
+      volumes:
+      - name: odoo-config
+        configMap: {name: apun-odoo-config}
+      - name: odoo-filestore
+        persistentVolumeClaim: {claimName: apun-filestore-pvc}

@@ -7,15 +7,42 @@
 #
 # SAFETY: never set `namespace:` here - placement is `-n` only.
 #
-# Web and cron still run in this one pod. The planned split into a web pod and
-# a cron pod is deploy/woow-k3s/planned/apun/cron-split.yaml, switched on only
-# in a scheduled outage (procedure in that file's header). Once it has been
-# switched on, and until that file is folded in here, every helm upgrade of
-# this release passes both files, in this order:
-#   -f deploy/woow-k3s/apun.yaml -f deploy/woow-k3s/planned/apun/cron-split.yaml
-# With this file alone the chart refuses the upgrade while apun-odoo-cron
-# exists, even at 0 replicas (it would delete the cron Deployment and put the
-# scheduled jobs back in the web pod).
+# Odoo runs as two pods, like WOOW's platform Odoo: apun-odoo serves the site
+# and runs no scheduled jobs, apun-odoo-cron runs them (odoo.cron below), so
+# the New API CRON signing key never sits in the internet-facing web pod. The
+# split was switched on in a scheduled outage on 2026-11-18 (release revision
+# 14) as a planned file layered on this one; that file has since been folded
+# in here, so this file alone is the whole configuration:
+#   helm --kube-context woow-k3s upgrade odoo-tenant charts/odoo-tenant -n apun \
+#     -f deploy/woow-k3s/apun.yaml
+# The chart refuses an upgrade whose values leave the split out while
+# apun-odoo-cron exists, even at 0 replicas: it would delete the cron
+# Deployment and put the scheduled jobs back in the web pod, which lacks the
+# cron-only key.
+#
+# Stopping Odoo means both Deployments, cron first, then web; a helm upgrade or
+# rollback starts both. A web-only restart is safe (the new web pod goes to the
+# cron pod's node). The chart README, "Separate cron Deployment", covers the
+# rest: the two pods share one node, and what to do when the web pod is
+# Pending.
+#
+# NO UPGRADE GATE: a new odoo.image does not upgrade any module by itself
+# (WOOW's platform chart runs its upgrade-gate init container for that). Every
+# image change follows docs/apun-image-change/README.md, which runs the
+# one-off `-u` Job BEFORE the helm upgrade.
+#
+# Do not take the split out with a rollback. Every revision up to 13 runs
+# without it, but also runs an image older than the database: revision 14's
+# one-off -u Job upgraded the platform modules for the AI models. A rollback
+# to one of them is valid only together with restoring the database from
+# before revision 14, which loses everything written since (see "Rollback" in
+# docs/apun-image-change/README.md); before it, delete the NetworkPolicy
+# apun-odoo-to-newapi-apporo-egress (a web pod without the four
+# WOOW_LLM_EXTRA_* variables must not reach the New API proxy) and scale
+# apun-odoo-cron to 0. Taking the split out on the current image is a values
+# change of its own (chart README, "Separate cron Deployment"): the web pod
+# would run the scheduled jobs again, and need the cron-only key that the
+# split keeps out of it.
 
 tenant: apun
 
@@ -27,11 +54,16 @@ odoo:
   # /opt/apporo/addons, which odoo.conf's addons_path names). Stock odoo would
   # start without those modules and break the site. Private on ghcr: pulled via
   # the namespace's default ServiceAccount (imagePullSecrets ghcr-pull-secret),
-  # because this chart has no odoo.imagePullSecrets. 20261118.0225 = platform
-  # v18.0.2.0.17 + AI models second site (apporo-odoo-image #6), 2026-11-18.
+  # because this chart has no odoo.imagePullSecrets. 20261118.0802 = platform
+  # v18.0.2.0.17 + AI models second site (apporo-odoo-image #6), the AI Models
+  # pilot list following every account (#7) and the gold AI pages with
+  # readable prices (#8), 2026-11-18. Both pods run this image.
   # Other work deploys new images to apun often: compare this pin with the live
   # Deployment right before merging or running helm upgrade, or the upgrade
-  # reverts www.apporo.ai to an older build.
+  # reverts www.apporo.ai to an older build. To change it, follow
+  # docs/apun-image-change/README.md: the module upgrade Job runs first, and the
+  # pin is <tag>@<digest> with the digest from the image publish job's DIGEST
+  # line.
   image: ghcr.io/woowtech/apporo-odoo:20261118.0802@sha256:a56821b0457a7a32582e05750e64e18703aab51492975df38637653161628dcd
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
@@ -83,14 +115,28 @@ odoo:
         limits:
           cpu: 50m
           memory: 32Mi
+  # The web keeps serving HTTP and runs no cron threads: the adopted command
+  # plus --max-cron-threads=0 (the chart refuses the split without it). The
+  # cron pod's own command is rendered by the chart from odoo.cron below.
   command:
     - bash
     - -c
-    - 'echo "Starting Odoo server..."
-    
-      exec odoo --config=/etc/odoo/odoo.conf
-    
-      '
+    - |
+      echo "Starting Odoo server..."
+      exec odoo --config=/etc/odoo/odoo.conf --max-cron-threads=0
+
+  # The database connection, then the platform's deploy-level endpoints for
+  # Apporo's own New API. Not secret. Both pods get them (the cron container
+  # inherits odoo.env), and must: the platform reads them once at process
+  # start. Without them both processes reject the new-api-apporo proxy URL and
+  # https://newapi.apporo.ai/v1 (writing either raises ValidationError, LLM
+  # crons fail with proxy_url_invalid), and the MCP URL guard does not protect
+  # new-api-apporo. Any other process that runs this Odoo - a `-u` Job, an
+  # `odoo shell` that writes LLM settings - needs the same entries: the
+  # platform checks a new proxy or public URL against the lists of the process
+  # that writes it. Format: woow_paas_platform src/services/llm_endpoints.py; a
+  # value that does not parse is ignored whole and only its NAME is logged, at
+  # ERROR.
   env:
     - name: HOST
       value: apun-postgres-svc
@@ -106,6 +152,31 @@ odoo:
         secretKeyRef:
           key: POSTGRES_PASSWORD
           name: apun-db-secret
+    - name: WOOW_LLM_EXTRA_PROXY_URLS
+      value: 'http://newapi-proxy.new-api-apporo.svc.cluster.local:8080'
+    - name: WOOW_LLM_EXTRA_PUBLIC_BASE_URLS
+      value: 'https://newapi.apporo.ai/v1'
+    - name: WOOW_LLM_EXTRA_CANARY_PAIRS
+      value: 'http://newapi-proxy.new-api-apporo.svc.cluster.local:8080=https://newapi.apporo.ai/v1'
+    - name: WOOW_LLM_EXTRA_PROTECTED_NAMESPACES
+      value: 'new-api-apporo'
+
+  # Names only. Key names mirror WOOW prod's paas-system/paas-odoo-platform-llm.
+  # Secret apun/apun-newapi-llm is not managed by this chart. The entries are
+  # NOT optional: a missing Secret or key keeps the pods from starting.
+  secretEnv:
+    both:
+      - name: WOOW_LLM_SECRET_KEYS
+        secretName: apun-newapi-llm
+        key: fernet-keys
+    web:
+      - name: WOOW_NEWAPI_PROXY_AUTH_WEB
+        secretName: apun-newapi-llm
+        key: proxy-auth-web
+    cron:
+      - name: WOOW_NEWAPI_PROXY_AUTH_CRON
+        secretName: apun-newapi-llm
+        key: proxy-auth-cron
   ports:
     - containerPort: 8069
       name: http
@@ -190,6 +261,102 @@ odoo:
         port: 8080
         protocol: TCP
         targetPort: 8080
+
+  # The cron pod, Deployment apun-odoo-cron: same image, odoo.conf and data as
+  # the web pod, scheduled jobs only, on the web pod's node (the volumes are
+  # ReadWriteOnce). Its egress comes from two NetworkPolicies this chart does
+  # not manage: allow-odoo-cron-to-mailcow (a copy of the rules of
+  # allow-odoo-to-mailcow, which selects only the web pod) and
+  # apun-odoo-to-newapi-apporo-egress (both pods to the New API proxy).
+  # If this pod is Pending or crash-looping, every scheduled job stops (mail
+  # queue, fetchmail, LLM billing) while the site looks healthy. Daily check:
+  # `kubectl -n apun get deploy apun-odoo-cron` shows 1/1 available, and in the
+  # database (read-only session) `select now() - max(lastcall) from ir_cron
+  # where active` is under an hour.
+  cron:
+    enabled: true
+    # WOOW's cron pod: --workers=0 --max-cron-threads=3 --db_maxconn=16.
+    # 3 threads x 3 connections + slack; the web keeps odoo.conf's pool.
+    maxCronThreads: 3
+    dbMaxconn: 16
+    extraArgs:
+      # The cron pod holds the CRON key and must take no connections from
+      # other pods. WOOW gets that from NetworkPolicy (no ingress allowed to its
+      # cron pods). Here default-deny-external lets every pod in apun reach
+      # every other one, and an added policy cannot take that away, so Odoo's
+      # HTTP server in this pod listens on loopback only. The probes below run
+      # inside the container for that reason.
+      - --http-interface=127.0.0.1
+      # odoo.conf's limit_memory_soft / limit_memory_hard (2 GiB / 2.5 GiB) are
+      # sized for one prefork worker. In threaded mode Odoo measures the VMS of
+      # the whole process against them: over soft the server re-executes
+      # itself, hard is the process's RLIMIT_AS (MemoryError). Prefork cron
+      # workers were already 0.7-0.8 GB VMS each with 7-8 threads, and this
+      # one process holds three cron threads plus the HTTP threads. WOOW's cron
+      # pod runs with 4 GiB / 5 GiB; same here, for this pod only.
+      - --limit-memory-soft=4294967296
+      - --limit-memory-hard=5368709120
+    # Copied from the web's wait-for-postgres. fix-permissions is left out:
+    # the web pod's copy already runs at every web start, on the same volume.
+    initContainers:
+      - command:
+        - sh
+        - -c
+        - 'echo "Waiting for PostgreSQL..."
+
+          until nc -z apun-postgres-svc 5432; do sleep 2; done
+
+          echo "PostgreSQL ready!"
+
+          '
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        name: wait-for-postgres
+        resources:
+          limits:
+            cpu: 50m
+            memory: 32Mi
+    # Odoo's own /web/health on odoo.conf's http_port 8099, from inside the
+    # container: the kubelet's httpGet would come in on the pod IP, where
+    # nothing listens. urlopen raises (exit 1) on a refused connection, a
+    # timeout or any non-2xx answer. (The web pod's probes use 8069, its nginx
+    # sidecar in front of the same 8099.)
+    startupProbe:
+      exec:
+        command:
+        - python3
+        - -I
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/web/health', timeout=4)
+      failureThreshold: 60
+      initialDelaySeconds: 30
+      periodSeconds: 15
+      successThreshold: 1
+      timeoutSeconds: 5
+    livenessProbe:
+      exec:
+        command:
+        - python3
+        - -I
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/web/health', timeout=8)
+      failureThreshold: 6
+      periodSeconds: 30
+      successThreshold: 1
+      timeoutSeconds: 10
+    # WOOW's cron pod: requests 250m / 1Gi, limits 2 CPU / 3Gi. Kept equal on
+    # purpose although 3Gi is below the 4 GiB soft limit above: VMS runs ahead
+    # of the memory the cgroup counts, so a runaway job can meet the kernel's
+    # OOM kill (SIGKILL, the job's transaction rolled back) before Odoo's own
+    # re-exec. WOOW's cron pod has the same pair (3Gi with 4/5 GiB from its
+    # odoo.conf). Change both sites together, if at all.
+    resources:
+      limits:
+        cpu: '2'
+        memory: 3Gi
+      requests:
+        cpu: 250m
+        memory: 1Gi
 
 nginx:
   enabled: true
