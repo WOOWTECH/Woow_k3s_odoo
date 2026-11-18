@@ -27,11 +27,12 @@ odoo:
   # /opt/apporo/addons, which odoo.conf's addons_path names). Stock odoo would
   # start without those modules and break the site. Private on ghcr: pulled via
   # the namespace's default ServiceAccount (imagePullSecrets ghcr-pull-secret),
-  # because this chart has no odoo.imagePullSecrets. Revision 13, 2026-11-17 18:50.
+  # because this chart has no odoo.imagePullSecrets. 20261118.0225 = platform
+  # v18.0.2.0.17 + AI models second site (apporo-odoo-image #6), 2026-11-18.
   # Other work deploys new images to apun often: compare this pin with the live
   # Deployment right before merging or running helm upgrade, or the upgrade
   # reverts www.apporo.ai to an older build.
-  image: ghcr.io/woowtech/apporo-odoo:20261117.1040@sha256:27a4146a885343eb9b29a8f67e6a5ce414459ce1ab5ed90b19a4753c8bb8d1e2
+  image: ghcr.io/woowtech/apporo-odoo:20261118.0225@sha256:f11ada68c494ae426b1c092344575464fec3aa4dffafe77d657032c35f6bfe2a
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:
