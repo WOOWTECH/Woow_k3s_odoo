@@ -30,6 +30,11 @@ manifests are templates next to this file; their placeholders (`__IMAGE__`,
   and the Fernet key from `odoo.secretEnv.both`. CI checks the template
   against apun.yaml, so use the template from the same checkout as the values
   file.
+- **`odoo.conf` is a Secret.** It holds the database and master passwords, so
+  every Odoo process mounts the Secret `apun-odoo-conf` (key `odoo.conf`, mode
+  0440, group 101), which this chart does not manage. The ConfigMap
+  `apun-odoo-config` it replaced must not be mounted again: its database
+  password no longer works.
 
 ## 0. Before you start
 

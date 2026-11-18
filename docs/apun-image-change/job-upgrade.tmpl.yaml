@@ -88,6 +88,6 @@ spec:
         - {name: odoo-filestore, mountPath: /var/lib/odoo}
       volumes:
       - name: odoo-config
-        configMap: {name: apun-odoo-config}
+        secret: {secretName: apun-odoo-conf, defaultMode: 288}
       - name: odoo-filestore
         persistentVolumeClaim: {claimName: apun-filestore-pvc}

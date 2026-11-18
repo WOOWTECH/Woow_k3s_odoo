@@ -54,17 +54,18 @@ odoo:
   # /opt/apporo/addons, which odoo.conf's addons_path names). Stock odoo would
   # start without those modules and break the site. Private on ghcr: pulled via
   # the namespace's default ServiceAccount (imagePullSecrets ghcr-pull-secret),
-  # because this chart has no odoo.imagePullSecrets. 20261118.0802 = platform
-  # v18.0.2.0.17 + AI models second site (apporo-odoo-image #6), the AI Models
-  # pilot list following every account (#7) and the gold AI pages with
-  # readable prices (#8), 2026-11-18. Both pods run this image.
+  # because this chart has no odoo.imagePullSecrets. 20261118.2122 = platform
+  # v18.0.2.0.18 (API and MCP for Home Connect and Security Access) + Apporo MCP
+  # (apporo-odoo-image #9), on top of the AI models second site (#6), the AI
+  # Models pilot list following every account (#7) and the gold AI pages with
+  # readable prices (#8). Both pods run this image.
   # Other work deploys new images to apun often: compare this pin with the live
   # Deployment right before merging or running helm upgrade, or the upgrade
   # reverts www.apporo.ai to an older build. To change it, follow
   # docs/apun-image-change/README.md: the module upgrade Job runs first, and the
   # pin is <tag>@<digest> with the digest from the image publish job's DIGEST
   # line.
-  image: ghcr.io/woowtech/apporo-odoo:20261118.0802@sha256:a56821b0457a7a32582e05750e64e18703aab51492975df38637653161628dcd
+  image: ghcr.io/woowtech/apporo-odoo:20261118.2122@sha256:9f11d5158064f85870d0d31e8dc0c4bd80fc5addce3635f59ed59fe7b1d88b61
   imagePullPolicy: IfNotPresent
   # IMMUTABLE on the live Deployment.
   selectorLabels:
@@ -173,6 +174,18 @@ odoo:
       - name: WOOW_NEWAPI_PROXY_AUTH_WEB
         secretName: apun-newapi-llm
         key: proxy-auth-web
+      # The HMAC key of the Apporo MCP gateway's calls (release apporo-mcp-gateway
+      # reads the same Secret and key). Optional: without it the platform refuses
+      # every gateway call and only Apporo MCP is down, www.apporo.ai still starts.
+      - name: WOOW_MCP_GATEWAY_SECRET
+        secretName: apporo-mcp-gateway
+        key: gateway-secret
+        optional: true
+      # The previous key while the gateway moves to a new one. Absent today.
+      - name: WOOW_MCP_GATEWAY_SECRET_PREVIOUS
+        secretName: apporo-mcp-gateway
+        key: gateway-secret-previous
+        optional: true
     cron:
       - name: WOOW_NEWAPI_PROXY_AUTH_CRON
         secretName: apun-newapi-llm
@@ -227,12 +240,15 @@ odoo:
       readOnly: true
     - mountPath: /var/lib/odoo
       name: odoo-filestore
-  # Verbatim: order is part of the pod template.
+  # Verbatim: order is part of the pod template. odoo.conf holds the database
+  # and master passwords, so it is the Secret apun-odoo-conf (key odoo.conf, not
+  # managed by this chart). Mode 0440: readable by group 101 (podSecurityContext
+  # fsGroup), which the odoo user is in.
   volumes:
-    - configMap:
-        defaultMode: 420
-        name: apun-odoo-config
-      name: odoo-config
+    - name: odoo-config
+      secret:
+        secretName: apun-odoo-conf
+        defaultMode: 288
     - name: odoo-filestore
       persistentVolumeClaim:
         claimName: apun-filestore-pvc
@@ -261,6 +277,13 @@ odoo:
         port: 8080
         protocol: TCP
         targetPort: 8080
+      # Odoo's own HTTP port (odoo.conf http_port). The Apporo MCP gateway calls
+      # /internal/woow/mcp/* here: nginx answers 404 for that path on 8069 and
+      # 8080, the ports every tunnel uses. The platform's HMAC check guards it.
+      - name: odoo-direct
+        port: 8099
+        protocol: TCP
+        targetPort: 8099
 
   # The cron pod, Deployment apun-odoo-cron: same image, odoo.conf and data as
   # the web pod, scheduled jobs only, on the web pod's node (the volumes are

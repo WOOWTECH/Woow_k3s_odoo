@@ -558,10 +558,11 @@ jobs:
           bad, docs = [], {}
           def pod_spec(d): return d["spec"]["template"]["spec"] if d["kind"] == "Job" else d["spec"]
           def refs(spec, c):
-              # mountPath -> the ConfigMap or claim behind it
+              # mountPath -> the ConfigMap, Secret or claim behind it
               vols = {}
               for v in spec.get("volumes") or []:
                   if "configMap" in v: vols[v["name"]] = ("ConfigMap", v["configMap"]["name"])
+                  elif "secret" in v: vols[v["name"]] = ("Secret", v["secret"]["secretName"])
                   elif "persistentVolumeClaim" in v: vols[v["name"]] = ("claim", v["persistentVolumeClaim"]["claimName"])
                   else: vols[v["name"]] = ("volume", v["name"])
               return {m["mountPath"]: vols.get(m["name"]) for m in c.get("volumeMounts") or []}
